@@ -64,15 +64,12 @@ st.markdown("""
 
 
 # ─────────────────────────────────────────────────────────
-# DATA LOADING — lee las 2 hojas del mismo Excel
-# Hoja "data"   → historial de ventas mensuales
-# Hoja "Hoja1"  → características de cada tienda (espejo)
+# DATA LOADING
 # ─────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_data(file_bytes):
     xls = pd.ExcelFile(file_bytes)
 
-    # ── Ventas (hoja "data") ──────────────────────────────
     df_v = xls.parse('data')
     df_v.columns = [str(c).strip() for c in df_v.columns]
 
@@ -88,10 +85,8 @@ def load_data(file_bytes):
     df_v = df_v.dropna(subset=['Ventas']).sort_values(['CR','Mes_Date'])
     df_v['Mes_Num']  = df_v.groupby('CR').cumcount() + 1
 
-    # ── Espejo (hoja "Hoja1") ─────────────────────────────
     df_e = xls.parse('Hoja1')
     df_e.columns = [str(c).strip().upper() for c in df_e.columns]
-    # Normalizar columna RENTA (a veces tiene espacio al final)
     df_e = df_e.rename(columns={c: 'RENTA' for c in df_e.columns if 'RENTA' in c})
     if 'VT' in df_e.columns:
         df_e['VIVIENDAS'] = df_e['VT']
@@ -108,7 +103,7 @@ def load_data(file_bytes):
 # ─────────────────────────────────────────────────────────
 # MIRROR STORE — distancia euclidiana ponderada
 # ─────────────────────────────────────────────────────────
-def find_mirror(df_espejo, nueva, df_ventas, exclude_cr, min_months, pesos):
+def find_mirror(df_espejo, nueva, df_ventas, exclude_cr, min_months, pesos, min_ventas=200_000):
     df_f = df_espejo[df_espejo['SEG26'] == nueva['SEG26']].copy()
     df_f = df_f[df_f['CR'] != exclude_cr]
 
@@ -121,6 +116,26 @@ def find_mirror(df_espejo, nueva, df_ventas, exclude_cr, min_months, pesos):
 
     if df_f.empty:
         return None, f"Sin tiendas con ≥{min_months} meses en segmento '{nueva['SEG26']}'"
+
+    # ── Filtrar por ventas promedio ≥ min_ventas ────────────────────────────
+    ventas_prom = (df_ventas.groupby('CR')['Ventas']
+                             .mean()
+                             .reset_index()
+                             .rename(columns={'Ventas': 'ventas_prom'}))
+    df_f = df_f.merge(ventas_prom, on='CR', how='left')
+    df_f['ventas_prom'] = df_f['ventas_prom'].fillna(0)
+
+    n_antes = len(df_f)
+    df_f_filtrado = df_f[df_f['ventas_prom'] >= min_ventas]
+
+    if df_f_filtrado.empty:
+        return None, (
+            f"Sin tiendas espejo con ventas promedio ≥ ${min_ventas:,.0f} "
+            f"en segmento '{nueva['SEG26']}' con ≥{min_months} meses. "
+            f"({n_antes} candidatas existían antes del filtro de ventas)"
+        )
+    df_f = df_f_filtrado
+    # ───────────────────────────────────────────────────────────────────────
 
     # Variables numéricas — normalizar con StandardScaler
     vars_num = ['ESTRATO','AREA','VIVIENDAS','EMPLEOS','VU6M','TRU6']
@@ -220,6 +235,18 @@ with st.sidebar:
                                       'poly2' :'Polinomial grado 2 ✅ (recomendado)',
                                       'poly3' :'Polinomial grado 3',
                                       'linear':'Lineal'}[x])
+
+    st.divider()
+    st.header("💰 Filtro Ventas Espejo")
+    min_ventas_espejo = st.number_input(
+        "Ventas promedio mínimas ($)",
+        min_value=0,
+        value=200_000,
+        step=10_000,
+        help="Solo se consideran tiendas espejo cuyas ventas promedio superen este umbral"
+    )
+    st.caption(f"Umbral activo: **${min_ventas_espejo:,.0f}**")
+
     st.divider()
     st.header("⚖️ Pesos Tienda Espejo")
     p = {
@@ -275,7 +302,6 @@ if data_bytes is None:
 with st.spinner("Cargando datos..."):
     df_ventas, df_espejo = load_data(data_bytes)
 
-# Calcular meses por tienda
 meses_cr  = df_ventas.groupby('CR')['Mes_Num'].max().reset_index()
 meses_cr.columns = ['CR','total_meses']
 nombres_cr = df_ventas.groupby('CR')['Tienda'].first().reset_index()
@@ -284,12 +310,18 @@ tiendas_nuevas = (meses_cr[meses_cr['total_meses'] < 10]
                   .merge(nombres_cr, on='CR', how='left')
                   .sort_values('total_meses'))
 
-# Banner resumen
+# Calcular candidatos espejo con filtro de ventas
+ventas_prom_all = df_ventas.groupby('CR')['Ventas'].mean()
+candidatos_espejo = meses_cr[
+    (meses_cr['total_meses'] >= min_months) &
+    (meses_cr['CR'].map(ventas_prom_all).fillna(0) >= min_ventas_espejo)
+]
+
 c1,c2,c3,c4 = st.columns(4)
 c1.metric("Tiendas en base ventas",    df_ventas['CR'].nunique())
 c2.metric("Tiendas en base espejo",    df_espejo['CR'].nunique())
 c3.metric("Tiendas < 10 meses",        len(tiendas_nuevas))
-c4.metric("Candidatos a espejo",       len(meses_cr[meses_cr['total_meses'] >= min_months]))
+c4.metric(f"Candidatos espejo (≥${min_ventas_espejo/1000:.0f}K)", len(candidatos_espejo))
 st.markdown("---")
 
 
@@ -318,7 +350,6 @@ with col_left:
     mc1.metric("Meses reales",      sel_meses)
     mc2.metric("Meses a proyectar", target_months - sel_meses)
 
-    # Características precargadas desde Hoja1
     row_esp = df_espejo[df_espejo['CR'] == sel_cr]
     has_esp = len(row_esp) > 0
 
@@ -383,11 +414,13 @@ with col_right:
         <li>Verifica sus características (se pre-llenan desde tu Excel)</li>
         <li>Pulsa <b>🚀 Proyectar Ventas</b></li>
         </ol>
-        El sistema buscará la tienda más similar con ≥{min} meses, aprenderá
-        su curva de crecimiento y proyectará hasta el mes {target},
+        El sistema buscará la tienda más similar con ≥{min} meses <b>y ventas promedio ≥ ${ventas}K</b>,
+        aprenderá su curva de crecimiento y proyectará hasta el mes {target},
         mostrando los meses <b>28, 29 y 30</b> con su promedio.
         </div>
-        """.replace('{min}', str(min_months)).replace('{target}', str(target_months)),
+        """.replace('{min}', str(min_months))
+           .replace('{target}', str(target_months))
+           .replace('{ventas}', f"{min_ventas_espejo/1000:.0f}"),
         unsafe_allow_html=True)
 
         st.markdown("### Tiendas disponibles (< 10 meses)")
@@ -399,7 +432,8 @@ with col_right:
     with st.spinner("Buscando tienda espejo..."):
         res_espejo, err = find_mirror(
             df_espejo, nueva_dict, df_ventas,
-            exclude_cr=sel_cr, min_months=min_months, pesos=pesos)
+            exclude_cr=sel_cr, min_months=min_months,
+            pesos=pesos, min_ventas=min_ventas_espejo)
 
     if err:
         st.error(f"❌ {err}")
@@ -409,6 +443,7 @@ with col_right:
     espejo_cr   = mejor['CR']
     espejo_name = str(mejor.get('NAME', espejo_cr))
     espejo_meses= int(mejor.get('total_meses', 0))
+    espejo_vprom= mejor.get('ventas_prom', 0)
 
     new_sales    = df_ventas[df_ventas['CR']==sel_cr   ].sort_values('Mes_Num')['Ventas'].tolist()
     mirror_sales = df_ventas[df_ventas['CR']==espejo_cr].sort_values('Mes_Num')['Ventas'].tolist()
@@ -418,13 +453,14 @@ with col_right:
     # ── Banner espejo ──
     st.success(
         f"✅ Tienda Espejo: **{espejo_name}** ({espejo_cr})  |  "
-        f"Similitud: **{mejor['SIMILITUD']:.1f}%**  |  {espejo_meses} meses de operación")
+        f"Similitud: **{mejor['SIMILITUD']:.1f}%**  |  "
+        f"{espejo_meses} meses  |  Venta prom: **${espejo_vprom:,.0f}**")
 
     kc1,kc2,kc3,kc4 = st.columns(4)
-    kc1.metric("Factor de escala",   f"{metrics['scale']:.3f}×")
-    kc2.metric("R² del modelo",      f"{metrics['r2']:.4f}")
-    kc3.metric("Meses espejo",       espejo_meses)
-    kc4.metric("Meses reales nueva", sel_meses)
+    kc1.metric("Factor de escala",      f"{metrics['scale']:.3f}×")
+    kc2.metric("R² del modelo",         f"{metrics['r2']:.4f}")
+    kc3.metric("Meses espejo",          espejo_meses)
+    kc4.metric("Venta prom. espejo",    f"${espejo_vprom:,.0f}")
 
     # ── KPIs 28-30 ──
     st.markdown("---")
@@ -489,21 +525,23 @@ with col_right:
 
     with tab2:
         cols_show = [c for c in ['CR','NAME','ZONA','MUN','ESTRATO','TIPO DE LOCAL',
-                                  'AREA','SEG26','VU6M','TRU6','SIMILITUD','total_meses']
+                                  'AREA','SEG26','VU6M','TRU6','ventas_prom','SIMILITUD','total_meses']
                      if c in res_espejo.columns]
         top10 = res_espejo.head(10)[cols_show].copy()
         if 'SIMILITUD' in top10.columns:
             top10['SIMILITUD'] = top10['SIMILITUD'].apply(lambda x: f"{x:.1f}%")
         if 'VU6M' in top10.columns:
             top10['VU6M'] = top10['VU6M'].apply(lambda x: f"${x:,.0f}")
-        st.dataframe(top10.rename(columns={'total_meses':'Meses op.'}),
+        if 'ventas_prom' in top10.columns:
+            top10['ventas_prom'] = top10['ventas_prom'].apply(lambda x: f"${x:,.0f}")
+        st.dataframe(top10.rename(columns={'total_meses':'Meses op.', 'ventas_prom':'Venta Prom'}),
                      use_container_width=True, hide_index=True)
 
         fig_sim = px.bar(res_espejo.head(10), x='CR', y='SIMILITUD',
-                          title='Top 10 por Similitud',
+                          title='Top 10 por Similitud (ventas prom ≥ umbral)',
                           color='SIMILITUD',
                           color_continuous_scale=['#C41E3A','#ED1C24','#FFD100','#28a745'],
-                          hover_data=['NAME'] if 'NAME' in res_espejo.columns else [])
+                          hover_data=['NAME','ventas_prom'] if 'NAME' in res_espejo.columns else ['ventas_prom'])
         fig_sim.update_layout(plot_bgcolor='rgba(0,0,0,0)',
                                paper_bgcolor='rgba(0,0,0,0)', height=320)
         st.plotly_chart(fig_sim, use_container_width=True)
