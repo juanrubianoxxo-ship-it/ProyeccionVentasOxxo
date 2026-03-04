@@ -107,10 +107,10 @@ def load_data(file_bytes):
     # ── HISTORICO VENTAS (tabla pivote exportada desde Excel) ─
     # Estructura: fila 4 = encabezados fecha | filas 5+ = datos CR
     df_raw = xls.parse('HISTORICO VENTAS', header=None)
-    header_row  = df_raw.iloc[4, :]
+    header_row  = df_raw.iloc[5, :]
     date_labels = header_row[1:].tolist()
 
-    df_piv = df_raw.iloc[5:, :].copy()
+    df_piv = df_raw.iloc[6:, :].copy()
     df_piv.columns = ['CR'] + date_labels
     df_piv = df_piv.reset_index(drop=True)
     df_piv['CR'] = df_piv['CR'].astype(str).str.strip()
