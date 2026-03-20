@@ -14,7 +14,7 @@ import os
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="OXXO | Proyección Espejo",
+    page_title="OXXO | Proyección Ventas y Contribución",
     page_icon="🏪",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -1222,7 +1222,7 @@ st.markdown(f"""
 border:1px solid rgba(237,28,36,0.2);border-radius:12px;
 padding:1.5rem 2rem;text-align:center;'>
   <span style='font-family:Bebas Neue,sans-serif;font-size:1.5rem;
-  color:#FFD100;letter-spacing:3px;'>OXXO ESPEJO</span>
+  color:#FFD100;letter-spacing:3px;'>OXXO PROYECCIÓN</span>
   <span style='color:#555;margin:0 1rem;'>·</span>
   <span style='font-size:0.82rem;color:#666;'>
   Espejo ≥{min_months}m · Prom. últ.3m ≥${min_ventas_ult3:,.0f} · 
