@@ -125,28 +125,53 @@ html, body, [class*="css"] {
 
 /* HIGHLIGHT BOXES */
 .proj-highlight {
-  background: linear-gradient(135deg, rgba(237,28,36,0.08) 0%, rgba(237,28,36,0.03) 100%);
-  border: 1px solid rgba(237,28,36,0.25);
-  border-radius: 16px;
-  padding: 2rem;
+  background: linear-gradient(135deg, rgba(237,28,36,0.10) 0%, rgba(237,28,36,0.04) 100%);
+  border: 1px solid rgba(237,28,36,0.30);
+  border-radius: 14px;
+  padding: 1.2rem 1rem 1rem 1rem;
   text-align: center;
   position: relative;
   overflow: hidden;
+  min-height: 110px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 0.3rem;
 }
 .proj-highlight.gold-h {
-  background: linear-gradient(135deg, rgba(255,209,0,0.08) 0%, rgba(255,209,0,0.03) 100%);
-  border-color: rgba(255,209,0,0.25);
+  background: linear-gradient(135deg, rgba(255,209,0,0.10) 0%, rgba(255,209,0,0.04) 100%);
+  border-color: rgba(255,209,0,0.30);
+}
+.proj-highlight .mes-tag {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--muted);
+  line-height: 1;
 }
 .proj-highlight .big-num {
   font-family: 'Bebas Neue', sans-serif;
-  font-size: 3.5rem;
+  font-size: clamp(1.6rem, 2.5vw, 2.4rem);
   line-height: 1;
-  margin: 0.5rem 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  margin: 0;
 }
-.proj-highlight .big-num.red-num { color: var(--red); }
+.proj-highlight .big-num.red-num  { color: var(--red); }
 .proj-highlight .big-num.gold-num { color: var(--gold); }
-.proj-highlight .label-h { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1.5px; font-weight: 600; }
-.proj-highlight .sub-h { font-size: 0.85rem; color: #888; margin-top: 0.3rem; }
+.proj-highlight .label-h {
+  font-size: 0.68rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.proj-highlight .sub-h { font-size: 0.72rem; color: #666; line-height: 1; }
 
 /* MIRROR CARD */
 .mirror-card {
@@ -450,41 +475,64 @@ def find_mirror(df_info, nueva, df_ventas, exclude_cr, min_months, pesos, min_ve
 # ─────────────────────────────────────────────────────────
 # PROJECTION — VENTAS (multiplicativo, clip>=0)
 # ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# PROJECTION — VENTAS (offset aditivo sobre espejo suavizado)
+#
+# El offset se calcula sobre los últimos min(3, n) meses reales
+# de la tienda nueva, que reflejan mejor su nivel estabilizado
+# y no están contaminados por el ruido de apertura.
+# Taper 100% → 30% en 24 meses: la tienda mantiene su diferencia
+# estructural pero converge gradualmente a la curva del espejo.
+# Clip >= 0 porque ventas no pueden ser negativas.
+# ─────────────────────────────────────────────────────────
 def project_series(new_sales_raw, mirror_sales_all, target=30, model_name='poly2'):
-    mirror_sales = mirror_sales_all[:30]
-    new_sales = new_sales_raw[1:] if len(new_sales_raw) > 1 else new_sales_raw
+    mirror_sales = np.array(mirror_sales_all[:30], dtype=float)
+    new_sales    = np.array(new_sales_raw[1:] if len(new_sales_raw) > 1 else new_sales_raw,
+                            dtype=float)
 
-    X_m = np.arange(1, len(mirror_sales)+1).reshape(-1, 1)
-    y_m = np.array(mirror_sales, dtype=float)
+    # Suavizar espejo
+    mirror_smooth = (pd.Series(mirror_sales)
+                     .rolling(3, min_periods=1, center=True)
+                     .mean().values)
+
+    X_m = np.arange(1, len(mirror_smooth)+1).reshape(-1, 1)
+    y_m = mirror_smooth
 
     models = {
         'linear': LinearRegression().fit(X_m, y_m),
-        'poly2': Pipeline([('p', PolynomialFeatures(2)), ('r', LinearRegression())]).fit(X_m, y_m),
-        'poly3': Pipeline([('p', PolynomialFeatures(3)), ('r', LinearRegression())]).fit(X_m, y_m),
+        'poly2' : Pipeline([('p', PolynomialFeatures(2)), ('r', LinearRegression())]).fit(X_m, y_m),
+        'poly3' : Pipeline([('p', PolynomialFeatures(3)), ('r', LinearRegression())]).fit(X_m, y_m),
     }
     r2s = {n: r2_score(y_m, m.predict(X_m)) for n, m in models.items()}
 
-    n_ov = min(len(new_sales), len(mirror_sales))
-    scale = (np.mean(new_sales[:n_ov]) / (np.mean(mirror_sales[:n_ov]) + 1e-9)) if n_ov >= 2 \
-        else (new_sales[0] / (mirror_sales[0] + 1e-9) if new_sales else 1.0)
+    X_all      = np.arange(1, target+1).reshape(-1, 1)
+    mirror_proj = models[model_name].predict(X_all)
 
-    X_all = np.arange(1, target+1).reshape(-1, 1)
-    proj = np.clip(models[model_name].predict(X_all) * scale, 0, None)
+    # Offset basado en los últimos meses reales (máx 3) — nivel estabilizado
+    n_ov      = min(len(new_sales), len(mirror_smooth))
+    n_recents = max(1, min(3, n_ov))
+    recent_new    = new_sales[-n_recents:]
+    recent_mirror = mirror_proj[n_ov - n_recents: n_ov]
+    offset = float(np.mean(recent_new - recent_mirror)) if n_recents >= 1 else 0.0
+
+    taper = np.array([max(0.3, 1.0 - i * 0.7 / 24) for i in range(target)])
+    proj  = np.clip(mirror_proj + offset * taper, 0, None)
+
     cur = len(new_sales)
-
     df_res = pd.DataFrame({
-        'Mes': range(1, target+1),
-        'Valor': [new_sales[i] if i < cur else proj[i] for i in range(target)],
-        'Tipo': ['Real' if i < cur else 'Proyectado' for i in range(target)],
+        'Mes'  : range(1, target+1),
+        'Valor': [float(new_sales[i]) if i < cur else float(proj[i]) for i in range(target)],
+        'Tipo' : ['Real' if i < cur else 'Proyectado' for i in range(target)],
     })
     metrics = {
-        'scale': scale, 'r2': r2s[model_name], 'r2s': r2s,
-        'm28': proj[27] if target >= 28 else None,
-        'm29': proj[28] if target >= 29 else None,
-        'm30': proj[29] if target >= 30 else None,
-        'prom_28_30': np.mean([proj[i] for i in [27, 28, 29] if i < target]),
+        'offset': offset, 'r2': r2s[model_name], 'r2s': r2s,
+        'm28'      : float(proj[27]) if target >= 28 else None,
+        'm29'      : float(proj[28]) if target >= 29 else None,
+        'm30'      : float(proj[29]) if target >= 30 else None,
+        'prom_28_30': float(np.mean([proj[i] for i in [27, 28, 29] if i < target])),
         'meses_reales_usados': cur,
         'meses_espejo_usados': len(mirror_sales),
+        'mirror_smooth': mirror_smooth.tolist(),
     }
     return df_res, metrics
 
@@ -842,79 +890,65 @@ with col_right:
     st.markdown("""<div class='section-title' style='font-size:1.2rem;'>🎯 Proyección Meses 28 · 29 · 30</div>""",
                 unsafe_allow_html=True)
 
+    def fmt(val):
+        """Format number as $XXX,XXX — always single line"""
+        if val is None: return "—"
+        abs_v = abs(val)
+        if abs_v >= 1_000_000:
+            return f"{'−' if val < 0 else ''}${abs_v/1_000_000:.2f}M"
+        if abs_v >= 100_000:
+            return f"{'−' if val < 0 else ''}${abs_v/1_000:.0f}K"
+        return f"{'−' if val < 0 else ''}${abs_v:,.0f}"
+
     # Ventas row
     col_v1, col_v2, col_v3, col_v4 = st.columns(4)
-    with col_v1:
-        st.markdown(f"""
-        <div class='proj-highlight'>
-          <div class='label-h'>💰 Ventas Mes 28</div>
-          <div class='big-num red-num'>${met_v['m28']:,.0f}</div>
-          <div class='sub-h'>Ventas Operativas</div>
-        </div>""", unsafe_allow_html=True)
-    with col_v2:
-        st.markdown(f"""
-        <div class='proj-highlight'>
-          <div class='label-h'>💰 Ventas Mes 29</div>
-          <div class='big-num red-num'>${met_v['m29']:,.0f}</div>
-          <div class='sub-h'>Ventas Operativas</div>
-        </div>""", unsafe_allow_html=True)
-    with col_v3:
-        st.markdown(f"""
-        <div class='proj-highlight'>
-          <div class='label-h'>💰 Ventas Mes 30</div>
-          <div class='big-num red-num'>${met_v['m30']:,.0f}</div>
-          <div class='sub-h'>Ventas Operativas</div>
-        </div>""", unsafe_allow_html=True)
-    with col_v4:
-        st.markdown(f"""
-        <div class='proj-highlight'>
-          <div class='label-h'>📊 Prom 28–30 Ventas</div>
-          <div class='big-num red-num'>${met_v['prom_28_30']:,.0f}</div>
-          <div class='sub-h'>promedio meses 28, 29 y 30</div>
-        </div>""", unsafe_allow_html=True)
+    for col, mes, val, label in [
+        (col_v1, 28, met_v['m28'],       "Ventas Op."),
+        (col_v2, 29, met_v['m29'],       "Ventas Op."),
+        (col_v3, 30, met_v['m30'],       "Ventas Op."),
+        (col_v4, None, met_v['prom_28_30'], "Prom. 28–30"),
+    ]:
+        mes_tag = f"MES {mes}" if mes else "PROMEDIO"
+        with col:
+            st.markdown(f"""
+            <div class='proj-highlight'>
+              <div class='mes-tag'>💰 {mes_tag}</div>
+              <div class='big-num red-num'>{fmt(val)}</div>
+              <div class='sub-h'>{label}</div>
+            </div>""", unsafe_allow_html=True)
 
     if has_contrib and met_c:
-        st.markdown("<div style='height:0.8rem;'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:0.6rem;'></div>", unsafe_allow_html=True)
         col_c1, col_c2, col_c3, col_c4 = st.columns(4)
-        with col_c1:
-            st.markdown(f"""
-            <div class='proj-highlight gold-h'>
-              <div class='label-h'>🟡 Contribución Mes 28</div>
-              <div class='big-num gold-num'>${met_c['m28']:,.0f}</div>
-              <div class='sub-h'>Contribución Directa</div>
-            </div>""", unsafe_allow_html=True)
-        with col_c2:
-            st.markdown(f"""
-            <div class='proj-highlight gold-h'>
-              <div class='label-h'>🟡 Contribución Mes 29</div>
-              <div class='big-num gold-num'>${met_c['m29']:,.0f}</div>
-              <div class='sub-h'>Contribución Directa</div>
-            </div>""", unsafe_allow_html=True)
-        with col_c3:
-            st.markdown(f"""
-            <div class='proj-highlight gold-h'>
-              <div class='label-h'>🟡 Contribución Mes 30</div>
-              <div class='big-num gold-num'>${met_c['m30']:,.0f}</div>
-              <div class='sub-h'>Contribución Directa</div>
-            </div>""", unsafe_allow_html=True)
-        with col_c4:
-            st.markdown(f"""
-            <div class='proj-highlight gold-h'>
-              <div class='label-h'>📊 Prom 28–30 Contrib.</div>
-              <div class='big-num gold-num'>${met_c['prom_28_30']:,.0f}</div>
-              <div class='sub-h'>promedio meses 28, 29 y 30</div>
-            </div>""", unsafe_allow_html=True)
+        for col, mes, val, label in [
+            (col_c1, 28, met_c['m28'],       "Contrib. Directa"),
+            (col_c2, 29, met_c['m29'],       "Contrib. Directa"),
+            (col_c3, 30, met_c['m30'],       "Contrib. Directa"),
+            (col_c4, None, met_c['prom_28_30'], "Prom. 28–30"),
+        ]:
+            mes_tag = f"MES {mes}" if mes else "PROMEDIO"
+            neg     = val is not None and val < 0
+            cls     = "proj-highlight gold-h"
+            num_cls = "big-num gold-num" if not neg else "big-num" 
+            style   = "color:#ff6b6b;" if neg else ""
+            with col:
+                st.markdown(f"""
+                <div class='{cls}'>
+                  <div class='mes-tag'>🟡 {mes_tag}</div>
+                  <div class='{num_cls}' style='{style}'>{fmt(val)}</div>
+                  <div class='sub-h'>{label}</div>
+                </div>""", unsafe_allow_html=True)
 
         # Margen implícito
         margin = met_c['prom_28_30'] / (met_v['prom_28_30'] + 1e-9) * 100
         st.markdown(f"""
         <div style='background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);
         border-radius:10px;padding:0.8rem 1.2rem;margin-top:0.8rem;
-        display:flex;align-items:center;gap:1rem;font-size:0.85rem;color:#bbb;'>
-          <span style='font-family:Bebas Neue,sans-serif;font-size:1.6rem;color:#22c55e;'>{margin:.1f}%</span>
-          <span>Margen implícito promedio (Contribución / Ventas) en meses 28–30 · 
-          Factor escala ventas: <b style='color:#ED1C24'>{met_v['scale']:.3f}×</b> · 
-          Offset contrib.: <b style='color:#FFD100'>${met_c['offset']:,.0f}</b> · 
+        display:flex;align-items:center;gap:1rem;font-size:0.85rem;color:#bbb;flex-wrap:wrap;'>
+          <span style='font-family:Bebas Neue,sans-serif;font-size:1.6rem;color:#22c55e;white-space:nowrap;'>{margin:.1f}% margen</span>
+          <span>Contribución / Ventas prom 28–30 ·
+          Offset ventas: <b style='color:#ED1C24'>${met_v['offset']:,.0f}</b> ·
+          Offset contrib.: <b style='color:#FFD100'>${met_c['offset']:,.0f}</b> ·
           R² ventas: <b>{met_v['r2']:.4f}</b> · R² contrib.: <b>{met_c['r2']:.4f}</b></span>
         </div>
         """, unsafe_allow_html=True)
