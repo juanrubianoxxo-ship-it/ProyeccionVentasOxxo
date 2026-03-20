@@ -914,7 +914,7 @@ with col_right:
           <span style='font-family:Bebas Neue,sans-serif;font-size:1.6rem;color:#22c55e;'>{margin:.1f}%</span>
           <span>Margen implícito promedio (Contribución / Ventas) en meses 28–30 · 
           Factor escala ventas: <b style='color:#ED1C24'>{met_v['scale']:.3f}×</b> · 
-          Factor escala contrib.: <b style='color:#FFD100'>{met_c['scale']:.3f}×</b> · 
+          Offset contrib.: <b style='color:#FFD100'>${met_c['offset']:,.0f}</b> · 
           R² ventas: <b>{met_v['r2']:.4f}</b> · R² contrib.: <b>{met_c['r2']:.4f}</b></span>
         </div>
         """, unsafe_allow_html=True)
