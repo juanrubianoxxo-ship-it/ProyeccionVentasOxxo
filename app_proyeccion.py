@@ -14,7 +14,7 @@ import os
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="OXXO | Proyección Espejo",
+    page_title="OXXO | Proyección VyC",
     page_icon="🏪",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -334,7 +334,7 @@ hr { border-color: var(--border) !important; margin: 1.5rem 0 !important; }
 st.markdown("""
 <div class='hero'>
   <div class='badge'>Motor de Proyección v2.0</div>
-  <h1>🏪 OXXO <span>ESPEJO</span></h1>
+  <h1>🏪 OXXO <span>PROTECCIÓN</span></h1>
   <p>Proyecta Ventas Operativas y Contribución Directa a 30 meses · Tiendas nuevas ≤ 10 meses</p>
 </div>
 """, unsafe_allow_html=True)
@@ -1223,7 +1223,7 @@ border:1px solid rgba(237,28,36,0.2);border-radius:12px;
 padding:1.4rem 2rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.8rem;'>
   <div style='display:flex;align-items:center;gap:0.8rem;flex-wrap:wrap;'>
     <span style='font-family:Bebas Neue,sans-serif;font-size:1.4rem;
-    color:#FFD100;letter-spacing:3px;'>OXXO ESPEJO</span>
+    color:#FFD100;letter-spacing:3px;'>OXXO PROYECCIÓN</span>
     <span style='color:#3a3a3a;'>·</span>
     <span style='font-size:0.78rem;color:#555;'>
     Espejo ≥{min_months}m · Prom. últ.3m ≥${min_ventas_ult3:,.0f} · 
