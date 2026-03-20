@@ -334,7 +334,7 @@ hr { border-color: var(--border) !important; margin: 1.5rem 0 !important; }
 st.markdown("""
 <div class='hero'>
   <div class='badge'>Motor de Proyección v2.0</div>
-  <h1>🏪 OXXO <span>PROTECCIÓN</span></h1>
+  <h1>🏪 OXXO <span>PROYECCIÓN</span></h1>
   <p>Proyecta Ventas Operativas y Contribución Directa a 30 meses · Tiendas nuevas ≤ 10 meses</p>
 </div>
 """, unsafe_allow_html=True)
