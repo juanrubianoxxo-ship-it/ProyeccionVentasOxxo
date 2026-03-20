@@ -448,7 +448,7 @@ def find_mirror(df_info, nueva, df_ventas, exclude_cr, min_months, pesos, min_ve
 
 
 # ─────────────────────────────────────────────────────────
-# PROJECTION — VENTAS y CONTRIBUCION
+# PROJECTION — VENTAS (multiplicativo, clip>=0)
 # ─────────────────────────────────────────────────────────
 def project_series(new_sales_raw, mirror_sales_all, target=30, model_name='poly2'):
     mirror_sales = mirror_sales_all[:30]
@@ -485,6 +485,79 @@ def project_series(new_sales_raw, mirror_sales_all, target=30, model_name='poly2
         'prom_28_30': np.mean([proj[i] for i in [27, 28, 29] if i < target]),
         'meses_reales_usados': cur,
         'meses_espejo_usados': len(mirror_sales),
+    }
+    return df_res, metrics
+
+
+# ─────────────────────────────────────────────────────────
+# PROJECTION — CONTRIBUCION (aditivo con suavizado)
+#
+# La contribución tiene valores negativos por naturaleza
+# (meses de inicio, estacionalidad, costos fijos).
+# Estrategia:
+#  1. Suavizar el espejo con media móvil (ventana 3) para
+#     reducir el ruido y dar una curva de maduración limpia.
+#  2. Ajustar con offset ADITIVO (no multiplicativo): calculado
+#     como la diferencia promedio entre la nueva tienda y el
+#     espejo en los meses coincidentes. Esto evita que signos
+#     opuestos generen un factor de escala inválido.
+#  3. El offset se aplana gradualmente de 100% → 30% en
+#     24 meses, capturando la diferencia estructural de costos
+#     sin que la tienda converja exactamente al espejo.
+#  4. SIN clip: la contribución puede ser negativa y eso es
+#     información válida (tienda aún en curva de inversión).
+# ─────────────────────────────────────────────────────────
+def project_contrib(new_contrib_raw, mirror_contrib_all, target=30, model_name='poly2'):
+    mirror = np.array(mirror_contrib_all[:30], dtype=float)
+    new_data = np.array(new_contrib_raw[1:] if len(new_contrib_raw) > 1 else new_contrib_raw,
+                        dtype=float)
+
+    # Suavizar espejo (media móvil centrada, ventana 3)
+    mirror_smooth = (pd.Series(mirror)
+                     .rolling(3, min_periods=1, center=True)
+                     .mean().values)
+
+    X_m = np.arange(1, len(mirror_smooth)+1).reshape(-1, 1)
+    y_m = mirror_smooth
+
+    models = {
+        'linear': LinearRegression().fit(X_m, y_m),
+        'poly2': Pipeline([('p', PolynomialFeatures(2)), ('r', LinearRegression())]).fit(X_m, y_m),
+        'poly3': Pipeline([('p', PolynomialFeatures(3)), ('r', LinearRegression())]).fit(X_m, y_m),
+    }
+    r2s = {n: r2_score(y_m, m.predict(X_m)) for n, m in models.items()}
+
+    X_all = np.arange(1, target+1).reshape(-1, 1)
+    mirror_proj = models[model_name].predict(X_all)  # sin clip
+
+    # Offset aditivo: diferencia promedio nueva − espejo en overlap
+    n_ov = min(len(new_data), len(mirror_smooth))
+    if n_ov >= 2:
+        offset = float(np.mean(new_data[:n_ov] - mirror_proj[:n_ov]))
+    elif len(new_data) == 1:
+        offset = float(new_data[0] - mirror_proj[0])
+    else:
+        offset = 0.0
+
+    # Taper: 1.0 → 0.3 en 24 meses (mantiene diferencia estructural residual)
+    taper = np.array([max(0.3, 1.0 - i * 0.7 / 24) for i in range(target)])
+    proj = mirror_proj + offset * taper
+
+    cur = len(new_data)
+    df_res = pd.DataFrame({
+        'Mes': range(1, target+1),
+        'Valor': [float(new_data[i]) if i < cur else float(proj[i]) for i in range(target)],
+        'Tipo': ['Real' if i < cur else 'Proyectado' for i in range(target)],
+    })
+    metrics = {
+        'offset': offset, 'r2': r2s[model_name], 'r2s': r2s,
+        'm28': float(proj[27]) if target >= 28 else None,
+        'm29': float(proj[28]) if target >= 29 else None,
+        'm30': float(proj[29]) if target >= 30 else None,
+        'prom_28_30': float(np.mean([proj[i] for i in [27, 28, 29] if i < target])),
+        'meses_reales_usados': cur,
+        'meses_espejo_usados': len(mirror),
+        'mirror_smooth': mirror_smooth.tolist(),
     }
     return df_res, metrics
 
@@ -759,7 +832,7 @@ with col_right:
     has_contrib = len(new_c_raw) > 0 and len(mirror_c_all) > 0
 
     if has_contrib:
-        proj_c_df, met_c = project_series(new_c_raw, mirror_c_all, target_months, model_choice)
+        proj_c_df, met_c = project_contrib(new_c_raw, mirror_c_all, target_months, model_choice)
     else:
         proj_c_df, met_c = None, None
         st.warning("⚠️ Sin datos de contribución para esta tienda o su espejo.")
@@ -931,11 +1004,66 @@ with col_right:
 
     with tab2:
         if has_contrib and proj_c_df is not None:
-            fig_c = make_projection_fig(
-                proj_c_df, mirror_c_all, sel_cr, espejo_name, espejo_cr, met_c,
-                '#FFD100', '#ffe566', '#555',
-                f'Contribución Directa — {sel_cr} · Modelo {model_choice}', 'Contribución ($)')
+            # Build custom contribution chart with smoothed mirror and zero-line
+            real_c  = proj_c_df[proj_c_df['Tipo'] == 'Real']
+            proy_c  = proj_c_df[proj_c_df['Tipo'] == 'Proyectado']
+            mirror_smooth_vals = met_c.get('mirror_smooth', mirror_c_all[:30])
+            mir_c_df = pd.DataFrame({'Mes': range(1, len(mirror_smooth_vals)+1),
+                                     'Valor': mirror_smooth_vals})
+
+            fig_c = go.Figure()
+            # Zero reference line
+            fig_c.add_hline(y=0, line_color='rgba(255,255,255,0.2)', line_dash='dot',
+                            annotation_text='Break-even', annotation_font_color='#888',
+                            annotation_position='bottom right')
+            # Espejo suavizado
+            fig_c.add_trace(go.Scatter(
+                x=mir_c_df['Mes'], y=mir_c_df['Valor'],
+                name=f'Espejo suavizado: {espejo_name}',
+                line=dict(color='#444', width=2, dash='dot'),
+                mode='lines', opacity=0.8))
+            # Real
+            if len(real_c) > 0:
+                fig_c.add_trace(go.Scatter(
+                    x=real_c['Mes'], y=real_c['Valor'],
+                    name=f'{sel_cr} — Real',
+                    line=dict(color='#FFD100', width=3),
+                    mode='lines+markers', marker=dict(size=7)))
+            # Proyectado con fill positivo/negativo
+            fig_c.add_trace(go.Scatter(
+                x=proy_c['Mes'], y=proy_c['Valor'],
+                name='Proyección contrib.',
+                line=dict(color='#ffe566', width=2.5, dash='dash'),
+                fill='tozeroy',
+                fillcolor='rgba(255,209,0,0.07)'))
+            # Anotaciones M28-30
+            for mes, val in [(28, met_c['m28']), (29, met_c['m29']), (30, met_c['m30'])]:
+                if val is not None and target_months >= mes:
+                    fig_c.add_vline(x=mes, line_color='rgba(255,209,0,0.3)', line_dash='dot')
+                    fig_c.add_annotation(x=mes, y=val,
+                        text=f"<b>M{mes}</b><br>${val/1000:.0f}K",
+                        showarrow=True, arrowhead=2, arrowcolor='#FFD100',
+                        bgcolor='rgba(20,20,20,0.9)', bordercolor='#FFD100',
+                        font=dict(color='#FFD100', size=11, family='DM Sans'),
+                        borderpad=5, borderwidth=1)
+            fig_c.update_layout(
+                title=f'Contribución Directa — {sel_cr} · Espejo suavizado + offset aditivo · Modelo {model_choice}',
+                xaxis_title='Mes de Operación',
+                yaxis_title='Contribución ($)',
+                height=420,
+                **PLOTLY_LAYOUT)
             st.plotly_chart(fig_c, use_container_width=True)
+
+            # Metodología note
+            st.markdown(f"""
+            <div class='info-box' style='font-size:0.8rem;'>
+            <b>⚙️ Metodología contribución:</b> El espejo se suaviza con media móvil (ventana 3) para
+            eliminar ruido. Se aplica un <b>offset aditivo de ${met_c['offset']:,.0f}</b> que refleja
+            la diferencia estructural entre la nueva tienda y el espejo, tapering de 100% → 30% en 24 meses.
+            Sin clip: valores negativos son válidos (tienda en curva de maduración).
+            R² sobre espejo suavizado: <b>{met_c['r2']:.4f}</b>
+            </div>
+            """, unsafe_allow_html=True)
 
             col_tc1, col_tc2 = st.columns([2, 1])
             with col_tc1:
@@ -952,6 +1080,7 @@ with col_right:
             # Combined chart — ventas + contribucion
             st.markdown("#### Ventas vs Contribución Directa (overlay)")
             fig_comb = go.Figure()
+            fig_comb.add_hline(y=0, line_color='rgba(255,255,255,0.15)', line_dash='dot')
             fig_comb.add_trace(go.Scatter(
                 x=proj_v_df['Mes'], y=proj_v_df['Valor'],
                 name='Ventas', line=dict(color='#ED1C24', width=2.5),
@@ -964,12 +1093,13 @@ with col_right:
                 mode='lines',
                 customdata=proj_c_df['Tipo'],
                 hovertemplate='M%{x} | Contrib: $%{y:,.0f} (%{customdata})<extra></extra>'))
-            # Margin area
+            # Margin %
             pv = proj_v_df['Valor'].values
             pc = proj_c_df['Valor'].values
             meses_arr = proj_v_df['Mes'].values
+            margin_pct = np.where(pv > 0, pc / pv * 100, 0)
             fig_comb.add_trace(go.Scatter(
-                x=meses_arr, y=pc / (pv + 1e-9) * 100,
+                x=meses_arr, y=margin_pct,
                 name='Margen %', yaxis='y2',
                 line=dict(color='#22c55e', width=1.5, dash='dot'),
                 hovertemplate='M%{x} | Margen: %{y:.1f}%<extra></extra>'))
@@ -1020,10 +1150,10 @@ with col_right:
                 'Activo': '✅' if mn == model_choice else '',
             }
             if has_contrib and met_c:
-                _, met_mc = project_series(new_c_raw, mirror_c_all, target_months, mn)
+                _, met_mc = project_contrib(new_c_raw, mirror_c_all, target_months, mn)
                 row['R² Contrib.'] = f"{met_mc['r2']:.4f}"
-                row['Contrib M30'] = f"${met_mc['m30']:,.0f}" if met_mc['m30'] else '—'
-                row['Prom C 28-30'] = f"${met_mc['prom_28_30']:,.0f}" if met_mc['prom_28_30'] else '—'
+                row['Contrib M30'] = f"${met_mc['m30']:,.0f}" if met_mc['m30'] is not None else '—'
+                row['Prom C 28-30'] = f"${met_mc['prom_28_30']:,.0f}" if met_mc['prom_28_30'] is not None else '—'
             summary.append(row)
         st.dataframe(pd.DataFrame(summary), use_container_width=True, hide_index=True)
 
