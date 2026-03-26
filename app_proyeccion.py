@@ -765,7 +765,6 @@ with col_left:
 
     # ── CLAVE: reset proyección al cambiar de tienda ──────
     if st.session_state.get("last_cr") != sel_cr:
-        # Limpiar flags de proyección de tiendas anteriores
         keys_to_del = [k for k in st.session_state if k.startswith("ran_") and not k.endswith(sel_cr)]
         for k in keys_to_del:
             del st.session_state[k]
@@ -821,7 +820,6 @@ with col_left:
 
     run = st.button("🚀  Proyectar Ventas + Contribución", use_container_width=True)
 
-    # ── CLAVE: persistir que ya se proyectó esta tienda ──
     run_key = f"ran_{sel_cr}"
     if run:
         st.session_state[run_key] = True
@@ -835,7 +833,6 @@ with col_left:
 with col_right:
     st.markdown("<div class='section-title'>📊 Resultados</div>", unsafe_allow_html=True)
 
-    # ── USA already_ran en vez de run ────────────────────
     if not already_ran:
         st.markdown(f"""
         <div class='info-box'>
@@ -977,38 +974,40 @@ with col_right:
         diff_v = met_v['prom_28_30'] - base_met_v['prom_28_30']
         diff_v_pct = diff_v / (abs(base_met_v['prom_28_30']) + 1e-9) * 100
 
+        # ── FIX: usar comillas dobles en atributos HTML del diff_c_str ──
         diff_c_str = ""
         if has_contrib:
-            base_c_all    = df_contrib[df_contrib['CR'] == base_cr].sort_values('Mes_Num')['Contribucion'].tolist()
+            base_c_all = df_contrib[df_contrib['CR'] == base_cr].sort_values('Mes_Num')['Contribucion'].tolist()
             if len(base_c_all) > 0:
                 _, base_met_c = project_contrib(new_c_raw, base_c_all, target_months, model_choice)
                 diff_c = met_c['prom_28_30'] - base_met_c['prom_28_30']
                 diff_c_pct = diff_c / (abs(base_met_c['prom_28_30']) + 1e-9) * 100
                 sign_c = "pos" if diff_c >= 0 else "neg"
                 arrow_c = "▲" if diff_c >= 0 else "▼"
-                diff_c_str = f"""
-                <div class='diff-item'>
-                  <div class='d-label'>Δ Contrib. prom 28–30 vs #1</div>
-                  <div class='d-val {sign_c}'>{arrow_c} ${abs(diff_c):,.0f} ({diff_c_pct:+.1f}%)</div>
-                </div>"""
+                diff_c_str = (
+                    f'<div class="diff-item">'
+                    f'<div class="d-label">Δ Contrib. prom 28–30 vs #1</div>'
+                    f'<div class="d-val {sign_c}">{arrow_c} ${abs(diff_c):,.0f} ({diff_c_pct:+.1f}%)</div>'
+                    f'</div>'
+                )
 
         sign_v = "pos" if diff_v >= 0 else "neg"
         arrow_v = "▲" if diff_v >= 0 else "▼"
-        st.markdown(f"""
-        <div class='diff-banner'>
-          <span style='font-size:0.72rem;color:#555;font-weight:700;letter-spacing:1px;
-          text-transform:uppercase;'>Δ vs espejo #1</span>
-          <div class='diff-item'>
-            <div class='d-label'>Δ Ventas prom 28–30 vs #1</div>
-            <div class='d-val {sign_v}'>{arrow_v} ${abs(diff_v):,.0f} ({diff_v_pct:+.1f}%)</div>
-          </div>
-          {diff_c_str}
-          <div class='diff-item'>
-            <div class='d-label'>Similitud</div>
-            <div class='d-val neu'>{mejor['SIMILITUD']:.1f}% vs {top5.iloc[0]['SIMILITUD']:.1f}%</div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="diff-banner">'
+            f'<span style="font-size:0.72rem;color:#555;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Δ vs espejo #1</span>'
+            f'<div class="diff-item">'
+            f'<div class="d-label">Δ Ventas prom 28–30 vs #1</div>'
+            f'<div class="d-val {sign_v}">{arrow_v} ${abs(diff_v):,.0f} ({diff_v_pct:+.1f}%)</div>'
+            f'</div>'
+            f'{diff_c_str}'
+            f'<div class="diff-item">'
+            f'<div class="d-label">Similitud</div>'
+            f'<div class="d-val neu">{mejor["SIMILITUD"]:.1f}% vs {top5.iloc[0]["SIMILITUD"]:.1f}%</div>'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
 
     # ── KPIs 28-30 VENTAS & CONTRIBUCION ──────────────────
     st.markdown("---")
