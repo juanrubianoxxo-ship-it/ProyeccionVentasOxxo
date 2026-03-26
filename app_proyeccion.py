@@ -179,7 +179,7 @@ html, body, [class*="css"] {
   border: 1px solid rgba(255,209,0,0.2);
   border-radius: 16px;
   padding: 1.5rem 2rem;
-  margin-bottom: 1.5rem;
+  margin-bottom: 0.75rem;
   display: flex;
   align-items: center;
   gap: 1.5rem;
@@ -206,6 +206,44 @@ html, body, [class*="css"] {
   font-size: 1.5rem;
   letter-spacing: 1px;
 }
+
+/* ── TOP-5 MIRROR SWITCHER ── */
+.mirror-switcher-wrap {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 14px;
+  padding: 1rem 1.2rem 0.8rem 1.2rem;
+  margin-bottom: 1.2rem;
+}
+.mirror-switcher-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: #555;
+  margin-bottom: 0.6rem;
+}
+
+/* DIFF BANNER */
+.diff-banner {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px;
+  padding: 0.75rem 1.2rem;
+  margin-bottom: 1rem;
+  align-items: center;
+  font-size: 0.82rem;
+  color: #aaa;
+}
+.diff-item { display: flex; flex-direction: column; align-items: center; gap: 0.1rem; }
+.diff-item .d-label { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 1px; color: #555; }
+.diff-item .d-val { font-family: 'Bebas Neue', sans-serif; font-size: 1.2rem; }
+.diff-item .d-val.pos { color: #22c55e; }
+.diff-item .d-val.neg { color: #ff6b6b; }
+.diff-item .d-val.neu { color: #aaa; }
 
 /* RULE PILL */
 .rule-pill {
@@ -333,9 +371,9 @@ hr { border-color: var(--border) !important; margin: 1.5rem 0 !important; }
 # HERO
 st.markdown("""
 <div class='hero'>
-  <div class='badge'>Motor de Proyección v2.0</div>
+  <div class='badge'>Motor de Proyección v2.1</div>
   <h1>🏪 OXXO <span>PROYECCIÓN</span></h1>
-  <p>Proyecta Ventas Operativas y Contribución Directa a 30 meses · Tiendas nuevas ≤ 10 meses</p>
+  <p>Proyecta Ventas Operativas y Contribución Directa a 30 meses · Tiendas nuevas ≤ 10 meses · Compara Top 5 Espejos</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -419,7 +457,6 @@ def find_mirror(df_info, nueva, df_ventas, exclude_cr, min_months, pesos, min_ve
     if df_f.empty:
         return None, f"Sin tiendas con ≥{min_months} meses"
 
-    # Promedio últimos 3 meses
     def prom_ult3(cr):
         s = df_ventas[df_ventas['CR'] == cr].sort_values('Mes_Num')['Ventas']
         if len(s) < 1: return 0
@@ -435,7 +472,6 @@ def find_mirror(df_info, nueva, df_ventas, exclude_cr, min_months, pesos, min_ve
             f"Sin tiendas espejo con promedio últimos 3 meses ≥ ${min_ventas_ult3:,.0f} "
             f"y ≥{min_months} meses. ({n_antes} candidatas antes del filtro)")
 
-    # Distancia euclidiana ponderada
     vars_num = ['ESTRATO','AREA','VIVIENDAS','EMPLEOS']
     X_num = df_f[vars_num].fillna(0).values
     X_new = np.array([[nueva.get(v, 0) for v in vars_num]])
@@ -464,7 +500,6 @@ def find_mirror(df_info, nueva, df_ventas, exclude_cr, min_months, pesos, min_ve
     df_f['DISTANCIA'] = dist
     df_f['SIMILITUD'] = sim
 
-    # Ventas prom general también
     ventas_prom = df_ventas.groupby('CR')['Ventas'].mean().reset_index()
     ventas_prom.columns = ['CR', 'ventas_prom']
     df_f = df_f.merge(ventas_prom, on='CR', how='left')
@@ -473,24 +508,13 @@ def find_mirror(df_info, nueva, df_ventas, exclude_cr, min_months, pesos, min_ve
 
 
 # ─────────────────────────────────────────────────────────
-# PROJECTION — VENTAS (multiplicativo, clip>=0)
-# ─────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────
-# PROJECTION — VENTAS (offset aditivo sobre espejo suavizado)
-#
-# El offset se calcula sobre los últimos min(3, n) meses reales
-# de la tienda nueva, que reflejan mejor su nivel estabilizado
-# y no están contaminados por el ruido de apertura.
-# Taper 100% → 30% en 24 meses: la tienda mantiene su diferencia
-# estructural pero converge gradualmente a la curva del espejo.
-# Clip >= 0 porque ventas no pueden ser negativas.
+# PROJECTION — VENTAS
 # ─────────────────────────────────────────────────────────
 def project_series(new_sales_raw, mirror_sales_all, target=30, model_name='poly2'):
     mirror_sales = np.array(mirror_sales_all[:30], dtype=float)
     new_sales    = np.array(new_sales_raw[1:] if len(new_sales_raw) > 1 else new_sales_raw,
                             dtype=float)
 
-    # Suavizar espejo
     mirror_smooth = (pd.Series(mirror_sales)
                      .rolling(3, min_periods=1, center=True)
                      .mean().values)
@@ -508,7 +532,6 @@ def project_series(new_sales_raw, mirror_sales_all, target=30, model_name='poly2
     X_all      = np.arange(1, target+1).reshape(-1, 1)
     mirror_proj = models[model_name].predict(X_all)
 
-    # Offset basado en los últimos meses reales (máx 3) — nivel estabilizado
     n_ov      = min(len(new_sales), len(mirror_smooth))
     n_recents = max(1, min(3, n_ov))
     recent_new    = new_sales[-n_recents:]
@@ -538,29 +561,13 @@ def project_series(new_sales_raw, mirror_sales_all, target=30, model_name='poly2
 
 
 # ─────────────────────────────────────────────────────────
-# PROJECTION — CONTRIBUCION (aditivo con suavizado)
-#
-# La contribución tiene valores negativos por naturaleza
-# (meses de inicio, estacionalidad, costos fijos).
-# Estrategia:
-#  1. Suavizar el espejo con media móvil (ventana 3) para
-#     reducir el ruido y dar una curva de maduración limpia.
-#  2. Ajustar con offset ADITIVO (no multiplicativo): calculado
-#     como la diferencia promedio entre la nueva tienda y el
-#     espejo en los meses coincidentes. Esto evita que signos
-#     opuestos generen un factor de escala inválido.
-#  3. El offset se aplana gradualmente de 100% → 30% en
-#     24 meses, capturando la diferencia estructural de costos
-#     sin que la tienda converja exactamente al espejo.
-#  4. SIN clip: la contribución puede ser negativa y eso es
-#     información válida (tienda aún en curva de inversión).
+# PROJECTION — CONTRIBUCION
 # ─────────────────────────────────────────────────────────
 def project_contrib(new_contrib_raw, mirror_contrib_all, target=30, model_name='poly2'):
     mirror = np.array(mirror_contrib_all[:30], dtype=float)
     new_data = np.array(new_contrib_raw[1:] if len(new_contrib_raw) > 1 else new_contrib_raw,
                         dtype=float)
 
-    # Suavizar espejo (media móvil centrada, ventana 3)
     mirror_smooth = (pd.Series(mirror)
                      .rolling(3, min_periods=1, center=True)
                      .mean().values)
@@ -576,9 +583,8 @@ def project_contrib(new_contrib_raw, mirror_contrib_all, target=30, model_name='
     r2s = {n: r2_score(y_m, m.predict(X_m)) for n, m in models.items()}
 
     X_all = np.arange(1, target+1).reshape(-1, 1)
-    mirror_proj = models[model_name].predict(X_all)  # sin clip
+    mirror_proj = models[model_name].predict(X_all)
 
-    # Offset aditivo: diferencia promedio nueva − espejo en overlap
     n_ov = min(len(new_data), len(mirror_smooth))
     if n_ov >= 2:
         offset = float(np.mean(new_data[:n_ov] - mirror_proj[:n_ov]))
@@ -587,7 +593,6 @@ def project_contrib(new_contrib_raw, mirror_contrib_all, target=30, model_name='
     else:
         offset = 0.0
 
-    # Taper: 1.0 → 0.3 en 24 meses (mantiene diferencia estructural residual)
     taper = np.array([max(0.3, 1.0 - i * 0.7 / 24) for i in range(target)])
     proj = mirror_proj + offset * taper
 
@@ -821,7 +826,8 @@ with col_right:
         <b>ℹ️ Cómo funciona:</b><br>
         1 · Selecciona tienda nueva (≤10 meses) en el panel izquierdo<br>
         2 · Verifica características — auto-cargadas desde INFO TIENDAS<br>
-        3 · Pulsa <b>🚀 Proyectar</b> para obtener Ventas Operativas y Contribución Directa
+        3 · Pulsa <b>🚀 Proyectar</b> para obtener Ventas Operativas y Contribución Directa<br>
+        4 · Usa los botones <b>Top 5 Espejos</b> para comparar cómo cambia la proyección con cada candidato
         </div>
         <div style='margin-top:0.8rem;display:flex;flex-wrap:wrap;gap:0.4rem;'>
           <span class='rule-pill'><span class='dot'></span>Espejo ≥{min_months} meses</span>
@@ -850,7 +856,69 @@ with col_right:
         st.error(f"❌ {err}")
         st.stop()
 
-    mejor       = res_espejo.iloc[0]
+    # ── Preparar top 5 candidatos ──────────────────────────
+    top5 = res_espejo.head(5).reset_index(drop=True)
+
+    # ── Session state: espejo activo ───────────────────────
+    # Key includes sel_cr so switching stores resets the selection
+    state_key = f"espejo_idx_{sel_cr}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = 0
+
+    # ── TOP 5 SWITCHER ─────────────────────────────────────
+    st.markdown("""
+    <div class='mirror-switcher-label'>🔄 Comparar Top 5 Espejos — haz clic para cambiar la proyección</div>
+    """, unsafe_allow_html=True)
+
+    btn_cols = st.columns(min(5, len(top5)))
+    for i, row_t5 in top5.iterrows():
+        t5_cr   = row_t5['CR']
+        t5_name = str(row_t5.get('NAME', t5_cr))[:14]
+        t5_sim  = row_t5['SIMILITUD']
+        t5_ult3 = row_t5.get('ventas_ult3', 0)
+        is_active = (st.session_state[state_key] == i)
+
+        rank_labels = ['🥇','🥈','🥉','4️⃣','5️⃣']
+        btn_label = f"{rank_labels[i]} {t5_name}\n{t5_sim:.0f}% · ${t5_ult3/1000:.0f}K"
+
+        with btn_cols[i]:
+            # Active indicator
+            if is_active:
+                st.markdown(f"""
+                <div style='background:rgba(255,209,0,0.12);border:2px solid #FFD100;
+                border-radius:10px;padding:0.6rem 0.5rem;text-align:center;cursor:pointer;
+                margin-bottom:0.3rem;'>
+                  <div style='font-size:1.1rem;'>{rank_labels[i]}</div>
+                  <div style='font-family:Bebas Neue,sans-serif;font-size:0.95rem;color:#FFD100;
+                  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'>{t5_name}</div>
+                  <div style='font-size:0.65rem;color:#aaa;'>{t5_sim:.0f}% sim</div>
+                  <div style='font-size:0.65rem;color:#FFD100;'>${t5_ult3/1000:.0f}K últ3</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div style='background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);
+                border-radius:10px;padding:0.6rem 0.5rem;text-align:center;margin-bottom:0.3rem;'>
+                  <div style='font-size:1.1rem;'>{rank_labels[i]}</div>
+                  <div style='font-family:Bebas Neue,sans-serif;font-size:0.95rem;color:#ccc;
+                  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'>{t5_name}</div>
+                  <div style='font-size:0.65rem;color:#555;'>{t5_sim:.0f}% sim</div>
+                  <div style='font-size:0.65rem;color:#888;'>${t5_ult3/1000:.0f}K últ3</div>
+                </div>
+                """, unsafe_allow_html=True)
+            if st.button(
+                "Activo ✓" if is_active else "Seleccionar",
+                key=f"btn_espejo_{sel_cr}_{i}",
+                use_container_width=True
+            ):
+                st.session_state[state_key] = i
+                st.rerun()
+
+    st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
+
+    # ── Espejo activo ──────────────────────────────────────
+    active_idx  = st.session_state[state_key]
+    mejor       = top5.iloc[active_idx]
     espejo_cr   = mejor['CR']
     espejo_name = str(mejor.get('NAME', espejo_cr))
     espejo_meses = int(mejor.get('total_meses', 0))
@@ -858,11 +926,15 @@ with col_right:
     espejo_vprom = mejor.get('ventas_prom', 0)
 
     # Mirror card
+    rank_labels_full = ['🥇 #1 — Mejor espejo','🥈 #2 — Espejo','🥉 #3 — Espejo','4️⃣ #4 — Espejo','5️⃣ #5 — Espejo']
     st.markdown(f"""
     <div class='mirror-card'>
       <div class='mirror-icon'>🏪</div>
       <div class='mirror-info'>
-        <div class='title'>{espejo_name} · {espejo_cr}</div>
+        <div class='title'>{espejo_name} · {espejo_cr}
+          <span style='font-size:0.72rem;color:#555;font-family:DM Sans,sans-serif;
+          font-weight:400;margin-left:0.5rem;'>{rank_labels_full[active_idx]}</span>
+        </div>
         <div class='sub'>{espejo_meses} meses de historia · Prom. últ. 3m: <b style='color:#FFD100'>${espejo_ult3:,.0f}</b> · Prom. gral: ${espejo_vprom:,.0f}</div>
       </div>
       <div class='sim-badge'>⚡ {mejor['SIMILITUD']:.1f}%</div>
@@ -885,13 +957,54 @@ with col_right:
         proj_c_df, met_c = None, None
         st.warning("⚠️ Sin datos de contribución para esta tienda o su espejo.")
 
+    # ── Diff banner vs espejo #1 (solo si no es el primero) ──
+    if active_idx > 0:
+        # Compute baseline with top-1
+        base_cr       = top5.iloc[0]['CR']
+        base_v_all    = df_ventas[df_ventas['CR'] == base_cr].sort_values('Mes_Num')['Ventas'].tolist()
+        _, base_met_v = project_series(new_v_raw, base_v_all, target_months, model_choice)
+        diff_v = met_v['prom_28_30'] - base_met_v['prom_28_30']
+        diff_v_pct = diff_v / (abs(base_met_v['prom_28_30']) + 1e-9) * 100
+
+        diff_c_str = ""
+        if has_contrib:
+            base_c_all    = df_contrib[df_contrib['CR'] == base_cr].sort_values('Mes_Num')['Contribucion'].tolist()
+            if len(base_c_all) > 0:
+                _, base_met_c = project_contrib(new_c_raw, base_c_all, target_months, model_choice)
+                diff_c = met_c['prom_28_30'] - base_met_c['prom_28_30']
+                diff_c_pct = diff_c / (abs(base_met_c['prom_28_30']) + 1e-9) * 100
+                sign_c = "pos" if diff_c >= 0 else "neg"
+                arrow_c = "▲" if diff_c >= 0 else "▼"
+                diff_c_str = f"""
+                <div class='diff-item'>
+                  <div class='d-label'>Δ Contrib. prom 28–30 vs #1</div>
+                  <div class='d-val {sign_c}'>{arrow_c} ${abs(diff_c):,.0f} ({diff_c_pct:+.1f}%)</div>
+                </div>"""
+
+        sign_v = "pos" if diff_v >= 0 else "neg"
+        arrow_v = "▲" if diff_v >= 0 else "▼"
+        st.markdown(f"""
+        <div class='diff-banner'>
+          <span style='font-size:0.72rem;color:#555;font-weight:700;letter-spacing:1px;
+          text-transform:uppercase;'>Δ vs espejo #1</span>
+          <div class='diff-item'>
+            <div class='d-label'>Δ Ventas prom 28–30 vs #1</div>
+            <div class='d-val {sign_v}'>{arrow_v} ${abs(diff_v):,.0f} ({diff_v_pct:+.1f}%)</div>
+          </div>
+          {diff_c_str}
+          <div class='diff-item'>
+            <div class='d-label'>Similitud</div>
+            <div class='d-val neu'>{mejor['SIMILITUD']:.1f}% vs {top5.iloc[0]['SIMILITUD']:.1f}%</div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
     # ── KPIs 28-30 VENTAS & CONTRIBUCION ──────────────────
     st.markdown("---")
     st.markdown("""<div class='section-title' style='font-size:1.2rem;'>🎯 Proyección Meses 28 · 29 · 30</div>""",
                 unsafe_allow_html=True)
 
     def fmt(val):
-        """Format number as $XXX,XXX — always single line"""
         if val is None: return "—"
         abs_v = abs(val)
         if abs_v >= 1_000_000:
@@ -929,7 +1042,7 @@ with col_right:
             mes_tag = f"MES {mes}" if mes else "PROMEDIO"
             neg     = val is not None and val < 0
             cls     = "proj-highlight gold-h"
-            num_cls = "big-num gold-num" if not neg else "big-num" 
+            num_cls = "big-num gold-num" if not neg else "big-num"
             style   = "color:#ff6b6b;" if neg else ""
             with col:
                 st.markdown(f"""
@@ -939,7 +1052,6 @@ with col_right:
                   <div class='sub-h'>{label}</div>
                 </div>""", unsafe_allow_html=True)
 
-        # Margen implícito
         margin = met_c['prom_28_30'] / (met_v['prom_28_30'] + 1e-9) * 100
         st.markdown(f"""
         <div style='background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);
@@ -953,12 +1065,13 @@ with col_right:
         </div>
         """, unsafe_allow_html=True)
 
-    # ── GRAFICOS ────────────────────────────────────────
+    # ── GRAFICOS ─────────────────────────────────────────
     st.markdown("---")
 
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📈 Ventas Operativas",
         "💛 Contribución Directa",
+        "🔄 Comparativo Top 5",
         "🏪 Candidatos Espejo",
         "📐 Comparar Modelos"
     ])
@@ -1021,7 +1134,7 @@ with col_right:
         fig_v = make_projection_fig(
             proj_v_df, mirror_v_all, sel_cr, espejo_name, espejo_cr, met_v,
             '#ED1C24', '#ff6b6b', '#555',
-            f'Ventas Operativas — {sel_cr} · Modelo {model_choice}', 'Ventas ($)')
+            f'Ventas Operativas — {sel_cr} · Espejo: {espejo_name} ({active_idx+1}° candidato) · {model_choice}', 'Ventas ($)')
         st.plotly_chart(fig_v, use_container_width=True)
 
         col_tv1, col_tv2 = st.columns([2, 1])
@@ -1033,12 +1146,11 @@ with col_right:
         with col_tv2:
             csv_v = proj_v_df.to_csv(index=False)
             st.download_button("📥 CSV Ventas", csv_v,
-                               f"ventas_{sel_cr}.csv", "text/csv",
+                               f"ventas_{sel_cr}_espejo{active_idx+1}.csv", "text/csv",
                                use_container_width=True)
 
     with tab2:
         if has_contrib and proj_c_df is not None:
-            # Build custom contribution chart with smoothed mirror and zero-line
             real_c  = proj_c_df[proj_c_df['Tipo'] == 'Real']
             proy_c  = proj_c_df[proj_c_df['Tipo'] == 'Proyectado']
             mirror_smooth_vals = met_c.get('mirror_smooth', mirror_c_all[:30])
@@ -1046,31 +1158,26 @@ with col_right:
                                      'Valor': mirror_smooth_vals})
 
             fig_c = go.Figure()
-            # Zero reference line
             fig_c.add_hline(y=0, line_color='rgba(255,255,255,0.2)', line_dash='dot',
                             annotation_text='Break-even', annotation_font_color='#888',
                             annotation_position='bottom right')
-            # Espejo suavizado
             fig_c.add_trace(go.Scatter(
                 x=mir_c_df['Mes'], y=mir_c_df['Valor'],
                 name=f'Espejo suavizado: {espejo_name}',
                 line=dict(color='#444', width=2, dash='dot'),
                 mode='lines', opacity=0.8))
-            # Real
             if len(real_c) > 0:
                 fig_c.add_trace(go.Scatter(
                     x=real_c['Mes'], y=real_c['Valor'],
                     name=f'{sel_cr} — Real',
                     line=dict(color='#FFD100', width=3),
                     mode='lines+markers', marker=dict(size=7)))
-            # Proyectado con fill positivo/negativo
             fig_c.add_trace(go.Scatter(
                 x=proy_c['Mes'], y=proy_c['Valor'],
                 name='Proyección contrib.',
                 line=dict(color='#ffe566', width=2.5, dash='dash'),
                 fill='tozeroy',
                 fillcolor='rgba(255,209,0,0.07)'))
-            # Anotaciones M28-30
             for mes, val in [(28, met_c['m28']), (29, met_c['m29']), (30, met_c['m30'])]:
                 if val is not None and target_months >= mes:
                     fig_c.add_vline(x=mes, line_color='rgba(255,209,0,0.3)', line_dash='dot')
@@ -1081,14 +1188,13 @@ with col_right:
                         font=dict(color='#FFD100', size=11, family='DM Sans'),
                         borderpad=5, borderwidth=1)
             fig_c.update_layout(
-                title=f'Contribución Directa — {sel_cr} · Espejo suavizado + offset aditivo · Modelo {model_choice}',
+                title=f'Contribución Directa — {sel_cr} · Espejo: {espejo_name} ({active_idx+1}°) · {model_choice}',
                 xaxis_title='Mes de Operación',
                 yaxis_title='Contribución ($)',
                 height=420,
                 **PLOTLY_LAYOUT)
             st.plotly_chart(fig_c, use_container_width=True)
 
-            # Metodología note
             st.markdown(f"""
             <div class='info-box' style='font-size:0.8rem;'>
             <b>⚙️ Metodología contribución:</b> El espejo se suaviza con media móvil (ventana 3) para
@@ -1108,10 +1214,9 @@ with col_right:
             with col_tc2:
                 csv_c = proj_c_df.to_csv(index=False)
                 st.download_button("📥 CSV Contribución", csv_c,
-                                   f"contrib_{sel_cr}.csv", "text/csv",
+                                   f"contrib_{sel_cr}_espejo{active_idx+1}.csv", "text/csv",
                                    use_container_width=True)
 
-            # Combined chart — ventas + contribucion
             st.markdown("#### Ventas vs Contribución Directa (overlay)")
             fig_comb = go.Figure()
             fig_comb.add_hline(y=0, line_color='rgba(255,255,255,0.15)', line_dash='dot')
@@ -1127,7 +1232,6 @@ with col_right:
                 mode='lines',
                 customdata=proj_c_df['Tipo'],
                 hovertemplate='M%{x} | Contrib: $%{y:,.0f} (%{customdata})<extra></extra>'))
-            # Margin %
             pv = proj_v_df['Valor'].values
             pc = proj_c_df['Valor'].values
             meses_arr = proj_v_df['Mes'].values
@@ -1149,7 +1253,141 @@ with col_right:
         else:
             st.info("Sin datos de contribución disponibles para esta tienda/espejo.")
 
+    # ── NUEVO TAB: COMPARATIVO TOP 5 ───────────────────────
     with tab3:
+        st.markdown("#### Ventas Operativas — Proyección por cada espejo candidato")
+
+        rank_colors = ['#FFD100', '#ED1C24', '#ff6b6b', '#888', '#555']
+        rank_labels_chart = ['🥇 #1','🥈 #2','🥉 #3','#4','#5']
+
+        fig_top5_v = go.Figure()
+        fig_top5_c = go.Figure()
+        fig_top5_c.add_hline(y=0, line_color='rgba(255,255,255,0.15)', line_dash='dot')
+
+        summary_rows = []
+
+        for i, row_t5 in top5.iterrows():
+            t5_cr    = row_t5['CR']
+            t5_name  = str(row_t5.get('NAME', t5_cr))[:18]
+            t5_sim   = row_t5['SIMILITUD']
+            color    = rank_colors[i]
+            lw       = 3.5 if i == active_idx else 1.5
+            dash     = 'solid' if i == active_idx else 'dash'
+            opacity  = 1.0 if i == active_idx else 0.55
+
+            # Ventas
+            t5_v_all = df_ventas[df_ventas['CR'] == t5_cr].sort_values('Mes_Num')['Ventas'].tolist()
+            if len(t5_v_all) == 0:
+                continue
+            t5_proj_v, t5_met_v = project_series(new_v_raw, t5_v_all, target_months, model_choice)
+            proy_only_v = t5_proj_v[t5_proj_v['Tipo'] == 'Proyectado']
+
+            fig_top5_v.add_trace(go.Scatter(
+                x=proy_only_v['Mes'], y=proy_only_v['Valor'],
+                name=f"{rank_labels_chart[i]} {t5_name} ({t5_sim:.0f}%)",
+                line=dict(color=color, width=lw, dash=dash),
+                opacity=opacity,
+                hovertemplate=f"{rank_labels_chart[i]} {t5_name}<br>M%{{x}}: $%{{y:,.0f}}<extra></extra>"
+            ))
+
+            # Contribucion
+            t5_c_all = df_contrib[df_contrib['CR'] == t5_cr].sort_values('Mes_Num')['Contribucion'].tolist()
+            has_c_t5 = len(new_c_raw) > 0 and len(t5_c_all) > 0
+            t5_met_c = None
+            if has_c_t5:
+                t5_proj_c, t5_met_c = project_contrib(new_c_raw, t5_c_all, target_months, model_choice)
+                proy_only_c = t5_proj_c[t5_proj_c['Tipo'] == 'Proyectado']
+                fig_top5_c.add_trace(go.Scatter(
+                    x=proy_only_c['Mes'], y=proy_only_c['Valor'],
+                    name=f"{rank_labels_chart[i]} {t5_name} ({t5_sim:.0f}%)",
+                    line=dict(color=color, width=lw, dash=dash),
+                    opacity=opacity,
+                    hovertemplate=f"{rank_labels_chart[i]} {t5_name}<br>M%{{x}}: $%{{y:,.0f}}<extra></extra>"
+                ))
+
+            row_s = {
+                'Rango': rank_labels_chart[i],
+                'CR Espejo': t5_cr,
+                'Nombre': t5_name,
+                'Similitud': f"{t5_sim:.1f}%",
+                'Últ.3m': f"${row_t5.get('ventas_ult3',0):,.0f}",
+                'V M28': fmt(t5_met_v['m28']),
+                'V M30': fmt(t5_met_v['m30']),
+                'V Prom 28-30': fmt(t5_met_v['prom_28_30']),
+                'Activo': '✅' if i == active_idx else '',
+            }
+            if t5_met_c:
+                row_s['C M28'] = fmt(t5_met_c['m28'])
+                row_s['C M30'] = fmt(t5_met_c['m30'])
+                row_s['C Prom 28-30'] = fmt(t5_met_c['prom_28_30'])
+            summary_rows.append(row_s)
+
+        # Real data overlay
+        real_only_v = proj_v_df[proj_v_df['Tipo'] == 'Real']
+        if len(real_only_v) > 0:
+            fig_top5_v.add_trace(go.Scatter(
+                x=real_only_v['Mes'], y=real_only_v['Valor'],
+                name=f'{sel_cr} — Real',
+                line=dict(color='white', width=3),
+                mode='lines+markers', marker=dict(size=7),
+                hovertemplate='Real M%{x}: $%{y:,.0f}<extra></extra>'
+            ))
+
+        # Marker for active
+        fig_top5_v.add_vline(
+            x=target_months,
+            line_color='rgba(255,255,255,0.1)', line_dash='dot')
+
+        fig_top5_v.update_layout(
+            title=f'Ventas Operativas — Top 5 espejos comparados · {sel_cr} · Espejo activo resaltado',
+            xaxis_title='Mes de Operación', yaxis_title='Ventas ($)',
+            height=420, **PLOTLY_LAYOUT)
+        st.plotly_chart(fig_top5_v, use_container_width=True)
+
+        if any('C Prom 28-30' in r for r in summary_rows):
+            st.markdown("#### Contribución Directa — Proyección por cada espejo candidato")
+            real_only_c = proj_c_df[proj_c_df['Tipo'] == 'Real'] if proj_c_df is not None else pd.DataFrame()
+            if len(real_only_c) > 0:
+                fig_top5_c.add_trace(go.Scatter(
+                    x=real_only_c['Mes'], y=real_only_c['Valor'],
+                    name=f'{sel_cr} — Real',
+                    line=dict(color='white', width=3),
+                    mode='lines+markers', marker=dict(size=7)))
+            fig_top5_c.update_layout(
+                title=f'Contribución Directa — Top 5 espejos comparados · {sel_cr}',
+                xaxis_title='Mes de Operación', yaxis_title='Contribución ($)',
+                height=400, **PLOTLY_LAYOUT)
+            st.plotly_chart(fig_top5_c, use_container_width=True)
+
+        st.markdown("#### Tabla resumen Top 5 espejos")
+        if summary_rows:
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+            # Bar chart comparativo prom 28-30
+            bar_data = []
+            for r in summary_rows:
+                try:
+                    raw_v = float(r['V Prom 28-30'].replace('$','').replace('K','e3').replace('M','e6').replace('−','-').replace(',',''))
+                except:
+                    raw_v = 0
+                bar_data.append({'Espejo': f"{r['Rango']} {r['Nombre']}", 'Ventas Prom 28-30': raw_v,
+                                  'Activo': r['Activo'] == '✅'})
+            bar_df = pd.DataFrame(bar_data)
+            colors_bar = [rank_colors[i] for i in range(len(bar_df))]
+            fig_bar = go.Figure(go.Bar(
+                x=bar_df['Espejo'], y=bar_df['Ventas Prom 28-30'],
+                marker_color=colors_bar,
+                text=[f"${v/1000:.0f}K" for v in bar_df['Ventas Prom 28-30']],
+                textposition='outside',
+                textfont=dict(color='white', size=11),
+            ))
+            fig_bar.update_layout(
+                title='Ventas prom 28–30 por espejo candidato',
+                height=320, xaxis_title='', yaxis_title='$',
+                **PLOTLY_LAYOUT)
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+    with tab4:
         cols_show = [c for c in ['CR', 'NAME', 'ZONA', 'MUN', 'ESTRATO', 'TIPO DE LOCAL',
                                    'AREA', 'SEG26', 'ventas_ult3', 'ventas_prom', 'SIMILITUD', 'total_meses']
                      if c in res_espejo.columns]
@@ -1171,7 +1409,7 @@ with col_right:
                                coloraxis_showscale=False)
         st.plotly_chart(fig_sim, use_container_width=True)
 
-    with tab4:
+    with tab5:
         summary = []
         for mn in ['linear', 'poly2', 'poly3']:
             _, met_m = project_series(new_v_raw, mirror_v_all, target_months, mn)
@@ -1227,7 +1465,7 @@ padding:1.4rem 2rem;display:flex;align-items:center;justify-content:space-betwee
     <span style='color:#3a3a3a;'>·</span>
     <span style='font-size:0.78rem;color:#555;'>
     Espejo ≥{min_months}m · Prom. últ.3m ≥${min_ventas_ult3:,.0f} · 
-    Sin mes 1 · Regresión {model_choice} · Offset aditivo
+    Sin mes 1 · Regresión {model_choice} · Offset aditivo · Top 5 comparativo
     </span>
   </div>
   <div style='display:flex;flex-direction:column;align-items:flex-end;gap:0.1rem;'>
