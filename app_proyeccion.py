@@ -763,6 +763,14 @@ with col_left:
     sel_meses_total = int(sel_row['total_meses'])
     sel_meses_usados = max(0, sel_meses_total - 1)
 
+    # ── CLAVE: reset proyección al cambiar de tienda ──────
+    if st.session_state.get("last_cr") != sel_cr:
+        # Limpiar flags de proyección de tiendas anteriores
+        keys_to_del = [k for k in st.session_state if k.startswith("ran_") and not k.endswith(sel_cr)]
+        for k in keys_to_del:
+            del st.session_state[k]
+        st.session_state["last_cr"] = sel_cr
+
     c1, c2, c3 = st.columns(3)
     c1.metric("Meses registrados", sel_meses_total)
     c2.metric("Meses útiles", sel_meses_usados, help="Sin mes 1")
@@ -813,6 +821,13 @@ with col_left:
 
     run = st.button("🚀  Proyectar Ventas + Contribución", use_container_width=True)
 
+    # ── CLAVE: persistir que ya se proyectó esta tienda ──
+    run_key = f"ran_{sel_cr}"
+    if run:
+        st.session_state[run_key] = True
+
+    already_ran = st.session_state.get(run_key, False)
+
 
 # ─────────────────────────────────────────────────────────
 # RESULTS PANEL
@@ -820,7 +835,8 @@ with col_left:
 with col_right:
     st.markdown("<div class='section-title'>📊 Resultados</div>", unsafe_allow_html=True)
 
-    if not run:
+    # ── USA already_ran en vez de run ────────────────────
+    if not already_ran:
         st.markdown(f"""
         <div class='info-box'>
         <b>ℹ️ Cómo funciona:</b><br>
@@ -860,7 +876,6 @@ with col_right:
     top5 = res_espejo.head(5).reset_index(drop=True)
 
     # ── Session state: espejo activo ───────────────────────
-    # Key includes sel_cr so switching stores resets the selection
     state_key = f"espejo_idx_{sel_cr}"
     if state_key not in st.session_state:
         st.session_state[state_key] = 0
@@ -879,10 +894,8 @@ with col_right:
         is_active = (st.session_state[state_key] == i)
 
         rank_labels = ['🥇','🥈','🥉','4️⃣','5️⃣']
-        btn_label = f"{rank_labels[i]} {t5_name}\n{t5_sim:.0f}% · ${t5_ult3/1000:.0f}K"
 
         with btn_cols[i]:
-            # Active indicator
             if is_active:
                 st.markdown(f"""
                 <div style='background:rgba(255,209,0,0.12);border:2px solid #FFD100;
@@ -925,7 +938,6 @@ with col_right:
     espejo_ult3 = mejor.get('ventas_ult3', 0)
     espejo_vprom = mejor.get('ventas_prom', 0)
 
-    # Mirror card
     rank_labels_full = ['🥇 #1 — Mejor espejo','🥈 #2 — Espejo','🥉 #3 — Espejo','4️⃣ #4 — Espejo','5️⃣ #5 — Espejo']
     st.markdown(f"""
     <div class='mirror-card'>
@@ -959,7 +971,6 @@ with col_right:
 
     # ── Diff banner vs espejo #1 (solo si no es el primero) ──
     if active_idx > 0:
-        # Compute baseline with top-1
         base_cr       = top5.iloc[0]['CR']
         base_v_all    = df_ventas[df_ventas['CR'] == base_cr].sort_values('Mes_Num')['Ventas'].tolist()
         _, base_met_v = project_series(new_v_raw, base_v_all, target_months, model_choice)
@@ -1013,7 +1024,6 @@ with col_right:
             return f"{'−' if val < 0 else ''}${abs_v/1_000:.0f}K"
         return f"{'−' if val < 0 else ''}${abs_v:,.0f}"
 
-    # Ventas row
     col_v1, col_v2, col_v3, col_v4 = st.columns(4)
     for col, mes, val, label in [
         (col_v1, 28, met_v['m28'],       "Ventas Op."),
@@ -1253,7 +1263,7 @@ with col_right:
         else:
             st.info("Sin datos de contribución disponibles para esta tienda/espejo.")
 
-    # ── NUEVO TAB: COMPARATIVO TOP 5 ───────────────────────
+    # ── TAB COMPARATIVO TOP 5 ──────────────────────────────
     with tab3:
         st.markdown("#### Ventas Operativas — Proyección por cada espejo candidato")
 
@@ -1275,7 +1285,6 @@ with col_right:
             dash     = 'solid' if i == active_idx else 'dash'
             opacity  = 1.0 if i == active_idx else 0.55
 
-            # Ventas
             t5_v_all = df_ventas[df_ventas['CR'] == t5_cr].sort_values('Mes_Num')['Ventas'].tolist()
             if len(t5_v_all) == 0:
                 continue
@@ -1290,7 +1299,6 @@ with col_right:
                 hovertemplate=f"{rank_labels_chart[i]} {t5_name}<br>M%{{x}}: $%{{y:,.0f}}<extra></extra>"
             ))
 
-            # Contribucion
             t5_c_all = df_contrib[df_contrib['CR'] == t5_cr].sort_values('Mes_Num')['Contribucion'].tolist()
             has_c_t5 = len(new_c_raw) > 0 and len(t5_c_all) > 0
             t5_met_c = None
@@ -1322,7 +1330,6 @@ with col_right:
                 row_s['C Prom 28-30'] = fmt(t5_met_c['prom_28_30'])
             summary_rows.append(row_s)
 
-        # Real data overlay
         real_only_v = proj_v_df[proj_v_df['Tipo'] == 'Real']
         if len(real_only_v) > 0:
             fig_top5_v.add_trace(go.Scatter(
@@ -1333,11 +1340,7 @@ with col_right:
                 hovertemplate='Real M%{x}: $%{y:,.0f}<extra></extra>'
             ))
 
-        # Marker for active
-        fig_top5_v.add_vline(
-            x=target_months,
-            line_color='rgba(255,255,255,0.1)', line_dash='dot')
-
+        fig_top5_v.add_vline(x=target_months, line_color='rgba(255,255,255,0.1)', line_dash='dot')
         fig_top5_v.update_layout(
             title=f'Ventas Operativas — Top 5 espejos comparados · {sel_cr} · Espejo activo resaltado',
             xaxis_title='Mes de Operación', yaxis_title='Ventas ($)',
@@ -1363,7 +1366,6 @@ with col_right:
         if summary_rows:
             st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
-            # Bar chart comparativo prom 28-30
             bar_data = []
             for r in summary_rows:
                 try:
@@ -1405,8 +1407,7 @@ with col_right:
             color='SIMILITUD',
             color_continuous_scale=['#1a1a1a', '#B01318', '#ED1C24', '#FFD100'],
             hover_data=['ventas_ult3', 'total_meses'])
-        fig_sim.update_layout(height=320, **PLOTLY_LAYOUT,
-                               coloraxis_showscale=False)
+        fig_sim.update_layout(height=320, **PLOTLY_LAYOUT, coloraxis_showscale=False)
         st.plotly_chart(fig_sim, use_container_width=True)
 
     with tab5:
