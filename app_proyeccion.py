@@ -9,6 +9,7 @@ from sklearn.metrics.pairwise import euclidean_distances
 import plotly.graph_objects as go
 import plotly.express as px
 import os
+import io
 
 # ─────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -402,7 +403,7 @@ def parse_fecha(s):
 # ─────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_data(file_bytes):
-    xls = pd.ExcelFile(file_bytes)
+    xls = pd.ExcelFile(io.BytesIO(file_bytes))
 
     # INFO TIENDAS
     df_info = xls.parse('INFO TIENDAS')
