@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import difflib
+import unicodedata
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from sklearn.pipeline import Pipeline
@@ -259,6 +261,20 @@ html, body, [class*="css"] {
 }
 .rule-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); flex-shrink: 0; }
 
+/* TE BADGE */
+.te-badge {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  background: rgba(34,197,94,0.15);
+  border: 1px solid rgba(34,197,94,0.4);
+  color: #22c55e;
+  padding: 0.15rem 0.5rem;
+  border-radius: 20px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
 /* SIDEBAR */
 [data-testid="stSidebar"] {
   background: var(--dark2) !important;
@@ -372,9 +388,9 @@ hr { border-color: var(--border) !important; margin: 1.5rem 0 !important; }
 # HERO
 st.markdown("""
 <div class='hero'>
-  <div class='badge'>Motor de Proyección v2.1</div>
+  <div class='badge'>Motor de Proyección v2.2</div>
   <h1>🏪 OXXO <span>PROYECCIÓN</span></h1>
-  <p>Proyecta Ventas Operativas y Contribución Directa a 30 meses · Tiendas nuevas ≤ 10 meses · Compara Top 5 Espejos</p>
+  <p>Proyecta Ventas Operativas y Contribución Directa a 30 meses · Tiendas nuevas ≤ 10 meses · Compara Top 5 Espejos + Espejo Manual (TE)</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -398,6 +414,52 @@ def parse_fecha(s):
     return pd.NaT
 
 
+def normaliza_txt(s):
+    """Normaliza texto para comparar nombres de tiendas: sin acentos, mayúsculas, espacios limpios."""
+    s = str(s).strip().upper()
+    s = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+    return ' '.join(s.split())
+
+
+def resolver_te(te_name, df_info, exclude_cr=None):
+    """
+    Busca en INFO TIENDAS el CR cuyo NAME corresponde al texto libre escrito
+    manualmente en la columna TE. Devuelve (cr, name_encontrado, tipo_match).
+    tipo_match: 'exacta' | 'aproximada' | None
+    """
+    if te_name is None or str(te_name).strip() == '' or str(te_name).strip().lower() == 'nan':
+        return None, None, None
+
+    df_names = df_info[['CR', 'NAME']].dropna(subset=['NAME']).drop_duplicates().copy()
+    if exclude_cr is not None:
+        df_names = df_names[df_names['CR'] != exclude_cr]
+    if df_names.empty:
+        return None, None, None
+
+    df_names['NAME_NORM'] = df_names['NAME'].apply(normaliza_txt)
+    te_norm = normaliza_txt(te_name)
+
+    # 1) coincidencia exacta
+    exact = df_names[df_names['NAME_NORM'] == te_norm]
+    if len(exact) > 0:
+        r = exact.iloc[0]
+        return r['CR'], r['NAME'], 'exacta'
+
+    # 2) uno contiene al otro (typo parcial, nombre corto, etc.)
+    contains = df_names[df_names['NAME_NORM'].apply(lambda x: te_norm in x or x in te_norm)]
+    if len(contains) > 0:
+        r = contains.iloc[0]
+        return r['CR'], r['NAME'], 'aproximada'
+
+    # 3) similitud difusa (typos, orden de palabras, etc.)
+    match = difflib.get_close_matches(te_norm, df_names['NAME_NORM'].tolist(), n=1, cutoff=0.72)
+    if match:
+        r = df_names[df_names['NAME_NORM'] == match[0]].iloc[0]
+        return r['CR'], r['NAME'], 'aproximada'
+
+    return None, None, None
+
+
 # ─────────────────────────────────────────────────────────
 # DATA LOADING
 # ─────────────────────────────────────────────────────────
@@ -409,11 +471,17 @@ def load_data(file_bytes):
     df_info = xls.parse('INFO TIENDAS')
     df_info.columns = [str(c).strip().upper() for c in df_info.columns]
     df_info = df_info.rename(columns={c: 'RENTA' for c in df_info.columns if 'RENTA' in c})
+
+    # Evitar columnas duplicadas (p.ej. si el rename de RENTA colisiona varias columnas)
+    if df_info.columns.duplicated().any():
+        df_info = df_info.loc[:, ~df_info.columns.duplicated(keep='first')]
+
     if 'VT' in df_info.columns: df_info['VIVIENDAS'] = df_info['VT']
     if 'ET' in df_info.columns: df_info['EMPLEOS'] = df_info['ET']
     for col in ['VIVIENDAS','EMPLEOS','AREA','ESTRATO']:
         if col not in df_info.columns: df_info[col] = 0
     if 'SEG26' not in df_info.columns: df_info['SEG26'] = 'BASE'
+    if 'TE' not in df_info.columns: df_info['TE'] = np.nan
     df_info['CR'] = df_info['CR'].astype(str).str.strip()
 
     def parse_sheet(sheet_name, value_col='Ventas'):
@@ -444,8 +512,12 @@ def load_data(file_bytes):
 
 # ─────────────────────────────────────────────────────────
 # MIRROR STORE — últimos 3 meses promedio >= 230,000
+# Incorpora el espejo manual (TE): si el CR resuelto de TE está entre los
+# candidatos que pasan los filtros, se le suma un bono de similitud para
+# que compita de forma justa contra el mejor candidato puramente algorítmico.
 # ─────────────────────────────────────────────────────────
-def find_mirror(df_info, nueva, df_ventas, exclude_cr, min_months, pesos, min_ventas_ult3):
+def find_mirror(df_info, nueva, df_ventas, exclude_cr, min_months, pesos, min_ventas_ult3,
+                 te_cr=None, te_bonus=15):
     df_f = df_info.copy()
     df_f = df_f[df_f['CR'] != exclude_cr]
 
@@ -500,6 +572,13 @@ def find_mirror(df_info, nueva, df_ventas, exclude_cr, min_months, pesos, min_ve
     df_f = df_f.copy()
     df_f['DISTANCIA'] = dist
     df_f['SIMILITUD'] = sim
+    df_f['ES_TE'] = False
+
+    # ── Bono por coincidir con el espejo manual (TE) ──
+    if te_cr is not None and te_cr in df_f['CR'].values:
+        mask_te = df_f['CR'] == te_cr
+        df_f.loc[mask_te, 'ES_TE'] = True
+        df_f.loc[mask_te, 'SIMILITUD'] = np.clip(df_f.loc[mask_te, 'SIMILITUD'] + te_bonus, 0, 100)
 
     ventas_prom = df_ventas.groupby('CR')['Ventas'].mean().reset_index()
     ventas_prom.columns = ['CR', 'ventas_prom']
@@ -657,6 +736,17 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     st.markdown("---")
+    st.markdown("## 🧭 Espejo Manual (TE)")
+    te_bonus = st.slider(
+        "Bono de similitud si coincide con TE", 0, 40, 15,
+        help="Puntos extra de similitud (0-100) que recibe la tienda espejo que la persona "
+             "que abrió la tienda nueva puso manualmente en la columna TE, siempre que esa "
+             "tienda cumpla los filtros de meses mínimos y ventas últ.3m."
+    )
+    st.caption("Si el TE manual cumple los filtros, compite en el ranking con este bono. "
+               "Si no los cumple (o no se encuentra), igual se compara aparte en la pestaña 🧭 TE vs Algoritmo.")
+
+    st.markdown("---")
     st.markdown("## ⚖️ Pesos Similitud")
     p = {
         'ZONA':          st.slider("Zona",           0, 100, 15),
@@ -688,9 +778,12 @@ if data_bytes is None:
     <div class='info-box'>
     <b>👈 Carga tu archivo para comenzar</b><br><br>
     El archivo debe contener <b>3 hojas</b>:<br>
-    • <code>INFO TIENDAS</code> → CR, NAME, ZONA, MUN, ESTRATO, TIPO DE LOCAL, AREA, SEG26, GENERADOR, VT, ET<br>
+    • <code>INFO TIENDAS</code> → CR, NAME, ZONA, MUN, ESTRATO, TIPO DE LOCAL, AREA, SEG26, GENERADOR, VT, ET, TE<br>
     • <code>HISTORICO VENTAS</code> → Pivote CR × mes de Ventas Operativas<br>
-    • <code>HISTORICO CON</code> → Pivote CR × mes de Contribución Directa
+    • <code>HISTORICO CON</code> → Pivote CR × mes de Contribución Directa<br><br>
+    <b>TE</b> es opcional: es el nombre (texto libre) de la tienda espejo que la persona que abrió
+    la tienda nueva sugirió manualmente. Si existe, el modelo la incorpora al cálculo de similitud
+    y además la compara contra el mejor espejo algorítmico.
     </div>
     """, unsafe_allow_html=True)
     st.stop()
@@ -819,6 +912,15 @@ with col_left:
         'AREA': area, 'VIVIENDAS': viviendas, 'EMPLEOS': empleos,
     }
 
+    # ── Resolver espejo manual TE ─────────────────────────
+    te_raw = None
+    if has_info and 'TE' in row_info.columns:
+        v = row_info.iloc[0]['TE']
+        if pd.notna(v) and str(v).strip() != '':
+            te_raw = str(v).strip()
+
+    te_cr, te_name_matched, te_match_type = resolver_te(te_raw, df_info, exclude_cr=sel_cr)
+
     run = st.button("🚀  Proyectar Ventas + Contribución", use_container_width=True)
 
     run_key = f"ran_{sel_cr}"
@@ -826,6 +928,25 @@ with col_left:
         st.session_state[run_key] = True
 
     already_ran = st.session_state.get(run_key, False)
+
+    if te_raw:
+        if te_cr:
+            color_b = '#22c55e' if te_match_type == 'exacta' else '#FFD100'
+            txt_b = 'coincidencia exacta' if te_match_type == 'exacta' else 'coincidencia aproximada — revisar'
+            st.markdown(f"""
+            <div style='background:rgba(255,209,0,0.08);border:1px solid rgba(255,209,0,0.25);
+            border-radius:8px;padding:0.6rem 0.9rem;font-size:0.78rem;color:#ccc;margin-top:0.6rem;'>
+            🧭 <b>Espejo manual (TE):</b> "{te_raw}"<br>
+            → <span style='color:{color_b}'>{te_name_matched}</span> · {te_cr}
+            <span style='color:#888'>({txt_b})</span>
+            </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style='background:rgba(237,28,36,0.08);border:1px solid rgba(237,28,36,0.25);
+            border-radius:8px;padding:0.6rem 0.9rem;font-size:0.78rem;color:#ccc;margin-top:0.6rem;'>
+            🧭 <b>Espejo manual (TE):</b> "{te_raw}"<br>
+            ⚠️ No se encontró ninguna tienda con ese nombre en INFO TIENDAS.
+            </div>""", unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────
@@ -841,7 +962,9 @@ with col_right:
         1 · Selecciona tienda nueva (≤10 meses) en el panel izquierdo<br>
         2 · Verifica características — auto-cargadas desde INFO TIENDAS<br>
         3 · Pulsa <b>🚀 Proyectar</b> para obtener Ventas Operativas y Contribución Directa<br>
-        4 · Usa los botones <b>Top 5 Espejos</b> para comparar cómo cambia la proyección con cada candidato
+        4 · Usa los botones <b>Top 5 Espejos</b> para comparar cómo cambia la proyección con cada candidato<br>
+        5 · Si la tienda tiene un espejo manual (TE) escrito por quien la abrió, se incorpora al ranking
+        con un bono de similitud y además se compara aparte en la pestaña <b>🧭 TE vs Algoritmo</b>
         </div>
         <div style='margin-top:0.8rem;display:flex;flex-wrap:wrap;gap:0.4rem;'>
           <span class='rule-pill'><span class='dot'></span>Espejo ≥{min_months} meses</span>
@@ -849,6 +972,7 @@ with col_right:
           <span class='rule-pill'><span class='dot'></span>Se usan primeros 30m del espejo</span>
           <span class='rule-pill'><span class='dot'></span>Mes 1 de la tienda nueva descartado</span>
           <span class='rule-pill'><span class='dot'></span>Proyección a {target_months} meses</span>
+          <span class='rule-pill'><span class='dot'></span>Bono TE: +{te_bonus} pts si el espejo manual pasa filtros</span>
         </div>
         """, unsafe_allow_html=True)
 
@@ -859,12 +983,13 @@ with col_right:
         st.dataframe(disp, use_container_width=True, hide_index=True, height=340)
         st.stop()
 
-    # ── Buscar espejo ──────────────────────────────────────
+    # ── Buscar espejo (algoritmo + bono TE) ────────────────
     with st.spinner("🔍 Buscando tienda espejo óptima..."):
         res_espejo, err = find_mirror(
             df_info, nueva_dict, df_ventas,
             exclude_cr=sel_cr, min_months=min_months,
-            pesos=pesos, min_ventas_ult3=min_ventas_ult3)
+            pesos=pesos, min_ventas_ult3=min_ventas_ult3,
+            te_cr=te_cr, te_bonus=te_bonus)
 
     if err:
         st.error(f"❌ {err}")
@@ -872,6 +997,7 @@ with col_right:
 
     # ── Preparar top 5 candidatos ──────────────────────────
     top5 = res_espejo.head(5).reset_index(drop=True)
+    te_en_top5 = bool(top5['ES_TE'].any()) if 'ES_TE' in top5.columns else False
 
     # ── Session state: espejo activo ───────────────────────
     state_key = f"espejo_idx_{sel_cr}"
@@ -883,15 +1009,24 @@ with col_right:
     <div class='mirror-switcher-label'>🔄 Comparar Top 5 Espejos — haz clic para cambiar la proyección</div>
     """, unsafe_allow_html=True)
 
+    if te_en_top5:
+        st.markdown("""
+        <div style='font-size:0.72rem;color:#22c55e;margin-bottom:0.5rem;'>
+        🧭 El espejo manual (TE) aparece marcado — recibió un bono de similitud por coincidir con lo indicado
+        por quien abrió la tienda.
+        </div>""", unsafe_allow_html=True)
+
     btn_cols = st.columns(min(5, len(top5)))
     for i, row_t5 in top5.iterrows():
         t5_cr   = row_t5['CR']
         t5_name = str(row_t5.get('NAME', t5_cr))[:14]
         t5_sim  = row_t5['SIMILITUD']
         t5_ult3 = row_t5.get('ventas_ult3', 0)
+        t5_es_te = bool(row_t5.get('ES_TE', False))
         is_active = (st.session_state[state_key] == i)
 
         rank_labels = ['🥇','🥈','🥉','4️⃣','5️⃣']
+        te_tag = "<div style='margin-top:0.15rem;'><span class='te-badge'>🧭 TE</span></div>" if t5_es_te else ""
 
         with btn_cols[i]:
             if is_active:
@@ -904,6 +1039,7 @@ with col_right:
                   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'>{t5_name}</div>
                   <div style='font-size:0.65rem;color:#aaa;'>{t5_sim:.0f}% sim</div>
                   <div style='font-size:0.65rem;color:#FFD100;'>${t5_ult3/1000:.0f}K últ3</div>
+                  {te_tag}
                 </div>
                 """, unsafe_allow_html=True)
             else:
@@ -915,6 +1051,7 @@ with col_right:
                   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'>{t5_name}</div>
                   <div style='font-size:0.65rem;color:#555;'>{t5_sim:.0f}% sim</div>
                   <div style='font-size:0.65rem;color:#888;'>${t5_ult3/1000:.0f}K últ3</div>
+                  {te_tag}
                 </div>
                 """, unsafe_allow_html=True)
             if st.button(
@@ -935,15 +1072,17 @@ with col_right:
     espejo_meses = int(mejor.get('total_meses', 0))
     espejo_ult3 = mejor.get('ventas_ult3', 0)
     espejo_vprom = mejor.get('ventas_prom', 0)
+    espejo_es_te = bool(mejor.get('ES_TE', False))
 
     rank_labels_full = ['🥇 #1 — Mejor espejo','🥈 #2 — Espejo','🥉 #3 — Espejo','4️⃣ #4 — Espejo','5️⃣ #5 — Espejo']
+    te_tag_full = " <span class='te-badge'>🧭 Coincide con TE</span>" if espejo_es_te else ""
     st.markdown(f"""
     <div class='mirror-card'>
       <div class='mirror-icon'>🏪</div>
       <div class='mirror-info'>
         <div class='title'>{espejo_name} · {espejo_cr}
           <span style='font-size:0.72rem;color:#555;font-family:DM Sans,sans-serif;
-          font-weight:400;margin-left:0.5rem;'>{rank_labels_full[active_idx]}</span>
+          font-weight:400;margin-left:0.5rem;'>{rank_labels_full[active_idx]}</span>{te_tag_full}
         </div>
         <div class='sub'>{espejo_meses} meses de historia · Prom. últ. 3m: <b style='color:#FFD100'>${espejo_ult3:,.0f}</b> · Prom. gral: ${espejo_vprom:,.0f}</div>
       </div>
@@ -975,7 +1114,6 @@ with col_right:
         diff_v = met_v['prom_28_30'] - base_met_v['prom_28_30']
         diff_v_pct = diff_v / (abs(base_met_v['prom_28_30']) + 1e-9) * 100
 
-        # ── FIX: usar comillas dobles en atributos HTML del diff_c_str ──
         diff_c_str = ""
         if has_contrib:
             base_c_all = df_contrib[df_contrib['CR'] == base_cr].sort_values('Mes_Num')['Contribucion'].tolist()
@@ -1075,15 +1213,81 @@ with col_right:
         </div>
         """, unsafe_allow_html=True)
 
+    # ── ESPEJO MANUAL (TE) vs ALGORÍTMICO ─────────────────
+    te_v_proj_df = te_c_proj_df = None
+    te_met_v = te_met_c = None
+    if te_raw:
+        if te_cr and te_cr in df_ventas['CR'].values:
+            te_v_all = df_ventas[df_ventas['CR'] == te_cr].sort_values('Mes_Num')['Ventas'].tolist()
+            if len(te_v_all) >= 4:
+                te_v_proj_df, te_met_v = project_series(new_v_raw, te_v_all, target_months, model_choice)
+                te_c_all = df_contrib[df_contrib['CR'] == te_cr].sort_values('Mes_Num')['Contribucion'].tolist()
+                if has_contrib and len(te_c_all) >= 1:
+                    te_c_proj_df, te_met_c = project_contrib(new_c_raw, te_c_all, target_months, model_choice)
+
+        st.markdown("---")
+        st.markdown("<div class='section-title' style='font-size:1.2rem;'>🧭 Espejo Manual (TE) vs Espejo Algorítmico</div>",
+                    unsafe_allow_html=True)
+
+        if te_met_v is None:
+            motivo = "No se encontró la tienda en la base." if not te_cr else "Esa tienda no tiene histórico suficiente (mínimo 4 meses)."
+            st.warning(f"⚠️ No se pudo proyectar con el espejo manual «{te_raw}». {motivo}")
+        elif espejo_es_te:
+            st.success(f"✅ El espejo activo ({espejo_name}) **es** el espejo manual (TE) — ya coinciden, "
+                       f"gracias al bono de +{te_bonus} pts de similitud aplicado.")
+        else:
+            te_meses = int(df_ventas[df_ventas['CR']==te_cr]['Mes_Num'].max())
+            te_ult3  = df_ventas[df_ventas['CR']==te_cr].sort_values('Mes_Num')['Ventas'].tail(3).mean()
+
+            st.markdown(f"""
+            <div class='mirror-card' style='border-color: rgba(34,197,94,0.3);'>
+              <div class='mirror-icon' style='background:linear-gradient(135deg, rgba(34,197,94,0.15), rgba(34,197,94,0.05));
+              border-color:rgba(34,197,94,0.3);'>🧭</div>
+              <div class='mirror-info'>
+                <div class='title'>{te_name_matched} · {te_cr}
+                  <span style='font-size:0.72rem;color:#555;font-family:DM Sans,sans-serif;
+                  font-weight:400;margin-left:0.5rem;'>Espejo manual (TE = "{te_raw}")</span>
+                </div>
+                <div class='sub'>{te_meses} meses de historia · Prom. últ. 3m: <b style='color:#22c55e'>${te_ult3:,.0f}</b></div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+            diff_v_te = te_met_v['prom_28_30'] - met_v['prom_28_30']
+            diff_v_te_pct = diff_v_te / (abs(met_v['prom_28_30']) + 1e-9) * 100
+            sign_v_te, arrow_v_te = ("pos","▲") if diff_v_te >= 0 else ("neg","▼")
+
+            diff_c_te_str = ""
+            if te_met_c and met_c:
+                diff_c_te = te_met_c['prom_28_30'] - met_c['prom_28_30']
+                diff_c_te_pct = diff_c_te / (abs(met_c['prom_28_30']) + 1e-9) * 100
+                sign_c_te, arrow_c_te = ("pos","▲") if diff_c_te >= 0 else ("neg","▼")
+                diff_c_te_str = (
+                    f'<div class="diff-item"><div class="d-label">Δ Contrib. prom 28–30 (TE vs Algo)</div>'
+                    f'<div class="d-val {sign_c_te}">{arrow_c_te} ${abs(diff_c_te):,.0f} ({diff_c_te_pct:+.1f}%)</div></div>'
+                )
+
+            st.markdown(
+                f'<div class="diff-banner">'
+                f'<span style="font-size:0.72rem;color:#555;font-weight:700;letter-spacing:1px;text-transform:uppercase;">TE vs Algorítmico ({espejo_name})</span>'
+                f'<div class="diff-item"><div class="d-label">Δ Ventas prom 28–30 (TE vs Algo)</div>'
+                f'<div class="d-val {sign_v_te}">{arrow_v_te} ${abs(diff_v_te):,.0f} ({diff_v_te_pct:+.1f}%)</div></div>'
+                f'{diff_c_te_str}</div>', unsafe_allow_html=True)
+
+            ct1, ct2 = st.columns(2)
+            ct1.metric(f"Ventas M30 · Algorítmico ({espejo_name})", fmt(met_v['m30']))
+            ct2.metric(f"Ventas M30 · TE manual ({te_name_matched})", fmt(te_met_v['m30']),
+                       delta=fmt(te_met_v['m30'] - met_v['m30']) if met_v['m30'] and te_met_v['m30'] else None)
+
     # ── GRAFICOS ─────────────────────────────────────────
     st.markdown("---")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📈 Ventas Operativas",
         "💛 Contribución Directa",
         "🔄 Comparativo Top 5",
         "🏪 Candidatos Espejo",
-        "📐 Comparar Modelos"
+        "📐 Comparar Modelos",
+        "🧭 TE vs Algoritmo"
     ])
 
     PLOTLY_LAYOUT = dict(
@@ -1280,6 +1484,7 @@ with col_right:
             t5_cr    = row_t5['CR']
             t5_name  = str(row_t5.get('NAME', t5_cr))[:18]
             t5_sim   = row_t5['SIMILITUD']
+            t5_es_te = bool(row_t5.get('ES_TE', False))
             color    = rank_colors[i]
             lw       = 3.5 if i == active_idx else 1.5
             dash     = 'solid' if i == active_idx else 'dash'
@@ -1291,12 +1496,13 @@ with col_right:
             t5_proj_v, t5_met_v = project_series(new_v_raw, t5_v_all, target_months, model_choice)
             proy_only_v = t5_proj_v[t5_proj_v['Tipo'] == 'Proyectado']
 
+            nombre_leyenda = f"{rank_labels_chart[i]} {t5_name} ({t5_sim:.0f}%)" + (" 🧭" if t5_es_te else "")
             fig_top5_v.add_trace(go.Scatter(
                 x=proy_only_v['Mes'], y=proy_only_v['Valor'],
-                name=f"{rank_labels_chart[i]} {t5_name} ({t5_sim:.0f}%)",
+                name=nombre_leyenda,
                 line=dict(color=color, width=lw, dash=dash),
                 opacity=opacity,
-                hovertemplate=f"{rank_labels_chart[i]} {t5_name}<br>M%{{x}}: $%{{y:,.0f}}<extra></extra>"
+                hovertemplate=f"{nombre_leyenda}<br>M%{{x}}: $%{{y:,.0f}}<extra></extra>"
             ))
 
             t5_c_all = df_contrib[df_contrib['CR'] == t5_cr].sort_values('Mes_Num')['Contribucion'].tolist()
@@ -1307,16 +1513,17 @@ with col_right:
                 proy_only_c = t5_proj_c[t5_proj_c['Tipo'] == 'Proyectado']
                 fig_top5_c.add_trace(go.Scatter(
                     x=proy_only_c['Mes'], y=proy_only_c['Valor'],
-                    name=f"{rank_labels_chart[i]} {t5_name} ({t5_sim:.0f}%)",
+                    name=nombre_leyenda,
                     line=dict(color=color, width=lw, dash=dash),
                     opacity=opacity,
-                    hovertemplate=f"{rank_labels_chart[i]} {t5_name}<br>M%{{x}}: $%{{y:,.0f}}<extra></extra>"
+                    hovertemplate=f"{nombre_leyenda}<br>M%{{x}}: $%{{y:,.0f}}<extra></extra>"
                 ))
 
             row_s = {
                 'Rango': rank_labels_chart[i],
                 'CR Espejo': t5_cr,
                 'Nombre': t5_name,
+                'TE': '🧭' if t5_es_te else '',
                 'Similitud': f"{t5_sim:.1f}%",
                 'Últ.3m': f"${row_t5.get('ventas_ult3',0):,.0f}",
                 'V M28': fmt(t5_met_v['m28']),
@@ -1355,7 +1562,7 @@ with col_right:
                     x=real_only_c['Mes'], y=real_only_c['Valor'],
                     name=f'{sel_cr} — Real',
                     line=dict(color='white', width=3),
-                    mode='lines+markers', marker=dict(size=7)))
+                    mode='lines+markers'))
             fig_top5_c.update_layout(
                 title=f'Contribución Directa — Top 5 espejos comparados · {sel_cr}',
                 xaxis_title='Mes de Operación', yaxis_title='Contribución ($)',
@@ -1391,19 +1598,23 @@ with col_right:
 
     with tab4:
         cols_show = [c for c in ['CR', 'NAME', 'ZONA', 'MUN', 'ESTRATO', 'TIPO DE LOCAL',
-                                   'AREA', 'SEG26', 'ventas_ult3', 'ventas_prom', 'SIMILITUD', 'total_meses']
+                                   'AREA', 'SEG26', 'ventas_ult3', 'ventas_prom', 'SIMILITUD',
+                                   'total_meses', 'ES_TE']
                      if c in res_espejo.columns]
         top10 = res_espejo.head(10)[cols_show].copy()
         if 'SIMILITUD'   in top10.columns: top10['SIMILITUD']   = top10['SIMILITUD'].apply(lambda x: f"{x:.1f}%")
         if 'ventas_ult3' in top10.columns: top10['ventas_ult3'] = top10['ventas_ult3'].apply(lambda x: f"${x:,.0f}")
         if 'ventas_prom' in top10.columns: top10['ventas_prom'] = top10['ventas_prom'].apply(lambda x: f"${x:,.0f}")
+        if 'ES_TE'       in top10.columns: top10['ES_TE']       = top10['ES_TE'].apply(lambda x: '🧭 TE' if x else '')
         st.dataframe(top10.rename(columns={
-            'total_meses': 'Meses', 'ventas_ult3': 'Prom Últ.3', 'ventas_prom': 'Prom Gral'}),
+            'total_meses': 'Meses', 'ventas_ult3': 'Prom Últ.3', 'ventas_prom': 'Prom Gral',
+            'ES_TE': 'Espejo Manual'}),
             use_container_width=True, hide_index=True)
 
         fig_sim = px.bar(
-            res_espejo.head(10), x='CR', y='SIMILITUD',
-            title=f'Top 10 candidatos espejo · Prom. últ.3m ≥ ${min_ventas_ult3:,.0f}',
+            res_espejo.head(10).drop(columns=['ES_TE'], errors='ignore'),
+            x='CR', y='SIMILITUD',
+            title=f'Top 10 candidatos espejo · Prom. últ.3m ≥ ${min_ventas_ult3:,.0f} (bono TE ya incluido)',
             color='SIMILITUD',
             color_continuous_scale=['#1a1a1a', '#B01318', '#ED1C24', '#FFD100'],
             hover_data=['ventas_ult3', 'total_meses'])
@@ -1451,6 +1662,62 @@ with col_right:
             **PLOTLY_LAYOUT)
         st.plotly_chart(fig_comp, use_container_width=True)
 
+    # ── TAB 6: TE vs ALGORITMO (gráficos + tabla comparativa) ──
+    with tab6:
+        if not te_raw:
+            st.info("Esta tienda no tiene un espejo manual (TE) asignado en INFO TIENDAS.")
+        elif te_met_v is None:
+            motivo = "No se encontró la tienda en la base." if not te_cr else "Esa tienda no tiene histórico suficiente (mínimo 4 meses)."
+            st.warning(f"No se pudo proyectar con el espejo manual «{te_raw}». {motivo}")
+        elif espejo_es_te:
+            st.success(f"El espejo activo ya es el espejo manual (TE): **{espejo_name}** · {espejo_cr}. "
+                       f"No hay comparación porque son la misma tienda.")
+        else:
+            fig_te = go.Figure()
+            real_v = proj_v_df[proj_v_df['Tipo']=='Real']
+            fig_te.add_trace(go.Scatter(x=real_v['Mes'], y=real_v['Valor'], name=f'{sel_cr} — Real',
+                                        line=dict(color='white', width=3), mode='lines+markers'))
+            proy_algo = proj_v_df[proj_v_df['Tipo']=='Proyectado']
+            fig_te.add_trace(go.Scatter(x=proy_algo['Mes'], y=proy_algo['Valor'],
+                                        name=f'Algorítmico ({espejo_name})', line=dict(color='#ED1C24', width=2.5, dash='dash')))
+            proy_te = te_v_proj_df[te_v_proj_df['Tipo']=='Proyectado']
+            fig_te.add_trace(go.Scatter(x=proy_te['Mes'], y=proy_te['Valor'],
+                                        name=f'TE manual ({te_name_matched})', line=dict(color='#22c55e', width=2.5, dash='dot')))
+            fig_te.update_layout(title=f'Ventas — Algorítmico vs TE manual · {sel_cr}',
+                                 xaxis_title='Mes', yaxis_title='Ventas ($)', height=420, **PLOTLY_LAYOUT)
+            st.plotly_chart(fig_te, use_container_width=True)
+
+            if te_met_c and met_c:
+                fig_te_c = go.Figure()
+                fig_te_c.add_hline(y=0, line_color='rgba(255,255,255,0.15)', line_dash='dot')
+                real_c = proj_c_df[proj_c_df['Tipo']=='Real']
+                if len(real_c) > 0:
+                    fig_te_c.add_trace(go.Scatter(x=real_c['Mes'], y=real_c['Valor'], name=f'{sel_cr} — Real',
+                                                  line=dict(color='white', width=3), mode='lines+markers'))
+                proy_algo_c = proj_c_df[proj_c_df['Tipo']=='Proyectado']
+                fig_te_c.add_trace(go.Scatter(x=proy_algo_c['Mes'], y=proy_algo_c['Valor'],
+                                              name=f'Algorítmico ({espejo_name})', line=dict(color='#FFD100', width=2.5, dash='dash')))
+                proy_te_c = te_c_proj_df[te_c_proj_df['Tipo']=='Proyectado']
+                fig_te_c.add_trace(go.Scatter(x=proy_te_c['Mes'], y=proy_te_c['Valor'],
+                                              name=f'TE manual ({te_name_matched})', line=dict(color='#22c55e', width=2.5, dash='dot')))
+                fig_te_c.update_layout(title=f'Contribución — Algorítmico vs TE manual · {sel_cr}',
+                                       xaxis_title='Mes', yaxis_title='Contribución ($)', height=400, **PLOTLY_LAYOUT)
+                st.plotly_chart(fig_te_c, use_container_width=True)
+
+            tabla_te = pd.DataFrame({
+                'Mes': proj_v_df['Mes'],
+                'Ventas Algorítmico': proj_v_df['Valor'],
+                'Ventas TE manual': te_v_proj_df['Valor'],
+                'Diferencia (TE - Algo)': te_v_proj_df['Valor'] - proj_v_df['Valor'],
+            })
+            disp_te = tabla_te.copy()
+            for c in ['Ventas Algorítmico','Ventas TE manual','Diferencia (TE - Algo)']:
+                disp_te[c] = disp_te[c].apply(lambda x: f"${x:,.0f}")
+            st.dataframe(disp_te, use_container_width=True, hide_index=True, height=280)
+
+            st.download_button("📥 CSV Comparativo TE vs Algorítmico", tabla_te.to_csv(index=False),
+                               f"te_vs_algo_{sel_cr}.csv", "text/csv")
+
 
 # ─────────────────────────────────────────────────────────
 # FOOTER
@@ -1466,7 +1733,7 @@ padding:1.4rem 2rem;display:flex;align-items:center;justify-content:space-betwee
     <span style='color:#3a3a3a;'>·</span>
     <span style='font-size:0.78rem;color:#555;'>
     Espejo ≥{min_months}m · Prom. últ.3m ≥${min_ventas_ult3:,.0f} · 
-    Sin mes 1 · Regresión {model_choice} · Offset aditivo · Top 5 comparativo
+    Sin mes 1 · Regresión {model_choice} · Offset aditivo · Top 5 comparativo · Bono TE +{te_bonus}pts
     </span>
   </div>
   <div style='display:flex;flex-direction:column;align-items:flex-end;gap:0.1rem;'>
